@@ -40,38 +40,26 @@
 
 ## Shell、编码与路径
 
-1. 用户可见文档、注释和报告默认使用中文。
-2. schema 字段名、manifest 键名、函数名、参数名和路径变量名保持英文。
-3. 中文 Markdown、JSON、PR body、评论正文不得通过 PowerShell inline、管道或 here-string 传递。
-4. 中文长文本先写 UTF-8 文件，再交给目标程序。
-5. Windows PowerShell 5.1 不使用 `&&`、`||` 或 Bash here-doc。
-6. 连续步骤拆成单条命令，或使用 PowerShell 原生控制流。
-7. Git 状态和 diff 核对使用 `git -c core.quotepath=false`。
-8. `.ps1` 文件如需要兼容 Windows PowerShell 5.1 中文输出，可使用 UTF-8 BOM。
-9. 自动化目录尽量使用英文、数字、短横线，避免 WinPE、cmd、SMB 和日志编码问题。
-
-## codex-win 工具优先使用场景
-
-1. 接手仓库或准备 GitHub 操作前，优先运行 `codex-win preflight` 或 `codex-win gh preflight` 判断本地 `gh`、认证和仓库状态。
-2. 处理中文 Markdown、JSON、PR body、评论正文、release notes 时，优先使用 `codex-win encoding check`、`codex-win encoding write-json`、`codex-win pr-body normalize` 和 `codex-win pr-body validate`。
-3. 在 Windows PowerShell 5.1 中准备执行复杂命令前，优先用 `codex-win shell lint --shell powershell5 --command "<command>"` 检查 `&&`、`||`、Bash here-doc 和 inline `gh --body` 风险。
-4. 创建、编辑或验证 PR 时，优先使用 `codex-win gh pr-create/pr-edit/pr-verify`；如果直接使用 `gh`，仍必须先通过 `codex-win pr-body validate`，并在写入后读回验证。
-5. 修改 `AGENTS.md`、任务卡或模板后，运行 `codex-win agents lint AGENTS.md` 或目标模板路径。
-6. 只有在 `codex-win` 不可用、当前任务不属于以上风险场景，或用户明确要求时，才直接使用原生命令替代。
+1. 用户可见文档、注释和报告默认使用中文；schema 字段名、manifest 键名、函数名、参数名和路径变量名保持英文。
+2. 中文 Markdown、JSON、PR body、评论正文不得通过 PowerShell inline、管道或 here-string 传递；先写 UTF-8 文件，再交给目标程序。
+3. 处理中文 Markdown、JSON 或文本编码时，优先运行 `codex-win encoding check <path>`；需要写 JSON 时优先用 `codex-win encoding write-json <path> --input <json-file>`。
+4. Windows PowerShell 5.1 不使用 `&&`、`||` 或 Bash here-doc；连续步骤拆成单条命令，或使用 PowerShell 原生控制流；准备执行复杂命令前，优先运行 `codex-win shell lint --shell powershell5 --command "<command>"` 检查 shell 方言和 inline `gh --body` 风险。
+5. Git 状态和 diff 核对使用 `git -c core.quotepath=false`。
+6. `.ps1` 文件如需要兼容 Windows PowerShell 5.1 中文输出，可使用 UTF-8 BOM。
+7. 自动化目录尽量使用英文、数字、短横线，避免 WinPE、cmd、SMB 和日志编码问题。
+8. 只有在 `codex-win` 不可用、当前任务不属于以上风险场景，或用户明确要求时，才直接使用原生命令替代；工具不可用时先报告原因，再使用最小等价命令，不静默降级。
 
 ## GitHub、Commit 与 PR
 
-1. 当前仓库本地存在且 `gh` 已认证时，GitHub 远端读写默认优先使用 `gh`。
-2. GitHub connector 仅在 `gh` 不可用、未认证、权限不足、功能无法完成，或用户明确要求时使用。
+1. 接手仓库或准备 GitHub 操作前，优先运行 `codex-win preflight` 或 `codex-win gh preflight` 判断本地 `gh`、认证和仓库状态。
+2. 当前仓库本地存在且 `gh` 已认证时，GitHub 远端读写默认优先使用 `gh`；connector 仅在 `gh` 不可用、未认证、权限不足、功能无法完成，或用户明确要求时使用。
 3. 不要对同一 Issue、PR、评论重复使用多个接口写入。
-4. 中文、多行 Markdown、code fence、反引号正文必须先写 `.tmp/pr-bodies/*.md` UTF-8 文件，再用 `gh --body-file`。
-5. 创建或更新 PR 后必须读回 title、body、base、head、Draft 状态并验证中文未损坏。
+4. 中文、多行 Markdown、code fence、反引号正文必须先写 `.tmp/bodies/*.md` UTF-8 文件，先运行 `codex-win body normalize/validate`，再用 `gh --body-file`；PR body 也可使用兼容入口 `codex-win pr-body ...`。
+5. 创建、编辑或验证 PR 时，优先使用 `codex-win gh pr-create/pr-edit/pr-verify`；如果直接使用 `gh`，仍必须先通过 `codex-win body validate`，并读回 title、body、base、head、Draft 状态验证中文未损坏。
 6. 阶段性或部分交付 PR 使用 `Refs #<issue>`；只有任务卡明确允许完整关闭时才使用 `Closes/Fixes/Resolves #<issue>`。
-7. 默认基于仓库默认分支创建 `codex/<short-task>` 分支。
-8. 一个任务卡对应一个分支和一个 PR。
-9. Commit 必须是原子的，不机械拆分无意义 commit。
-10. 提交前用 `git -c core.quotepath=false diff --name-only` 和 `git ls-files --others --exclude-standard` 核对文件。
-11. 提交后用 `git -c core.quotepath=false diff --name-only origin/<base>...HEAD` 核对 PR 相对基线的 changed files。
+7. 默认基于仓库默认分支创建 `codex/<short-task>` 分支；一个任务卡对应一个分支和一个 PR。
+8. Commit 必须是原子的，不机械拆分无意义 commit。
+9. 提交前用 `git -c core.quotepath=false diff --name-only` 和 `git ls-files --others --exclude-standard` 核对文件；提交后用 `git -c core.quotepath=false diff --name-only origin/<base>...HEAD` 核对 PR 相对基线的 changed files。
 
 ## 工作区保护
 
@@ -87,11 +75,11 @@
 
 | 改动类型 | 优先验证 |
 |---|---|
-| 文档 | `git diff --check`、链接/引用搜索、changed files 核对 |
+| 文档 | `git diff --check`、链接/引用搜索、changed files 核对；修改 AGENTS 或模板后运行 `codex-win agents lint <path>` |
 | Python | `python -m compileall src`、定向 unittest、相关 CLI smoke test |
-| PowerShell | 语法解析、定向测试、禁止真实危险动作 |
-| GitHub/PR | PR body validate、gh create/edit、gh view 读回验证 |
-| hooks | 单条命令 lint、stdin JSON smoke test |
+| PowerShell | `codex-win shell lint --shell powershell5 --command "..."`、语法解析、定向测试、禁止真实危险动作 |
+| GitHub/PR | `codex-win body validate`、`codex-win gh pr-create/pr-edit/pr-verify`、gh view 读回验证 |
+| hooks | `codex-win shell lint`、stdin JSON smoke test |
 
 失败时记录精确命令和关键错误；不通过无限重跑掩盖不稳定测试；无代码变化时不重复运行同一个重型失败命令。
 

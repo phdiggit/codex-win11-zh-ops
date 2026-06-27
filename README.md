@@ -26,8 +26,8 @@ python -m pip install -e .
 codex-win preflight
 
 # 校验 PR body
-codex-win pr-body normalize --input draft.md --output .tmp/pr-bodies/body.md
-codex-win pr-body validate .tmp/pr-bodies/body.md
+codex-win body normalize --input draft.md --output .tmp/bodies/body.md
+codex-win body validate .tmp/bodies/body.md
 
 # 检查 Windows PowerShell 5.1 命令是否含不兼容语法
 codex-win shell lint --shell powershell5 --command "git status && git diff"
@@ -65,6 +65,13 @@ codex-win install-template --profile strict --target C:\path\to\repo
 codex-win install-template --profile strict --target C:\path\to\repo --overwrite
 ```
 
+路径包含空格时必须加引号；如果当前目录就是目标仓库，也可以用 `--target .`：
+
+```powershell
+codex-win install-template --profile strict --target "E:\code\not versioned\testCodex"
+codex-win install-template --profile strict --target .
+```
+
 维护模板时，根目录 `templates/` 与包内 `src/codex_win11_zh/templates/` 必须保持一致；`python -m unittest discover -s tests` 会检查两份模板是否同步。
 
 ## 主要 CLI
@@ -73,6 +80,8 @@ codex-win install-template --profile strict --target C:\path\to\repo --overwrite
 codex-win preflight
 codex-win encoding check <path>
 codex-win encoding write-json <path> --input <json-file>
+codex-win body normalize --input <in.md> --output <out.md>
+codex-win body validate <body.md>
 codex-win pr-body normalize --input <in.md> --output <out.md>
 codex-win pr-body validate <body.md>
 codex-win gh preflight
@@ -101,7 +110,9 @@ codex-win evals report --output reports/local.json
 python -m codex_win11_zh.hooks.pre_tool_use
 ```
 
-使用 `codex-win install-template --profile strict --target <repo>` 时会自动复制 hooks。安装后如果 Codex 没有触发 hook，先确认 `.codex/hooks.json` 存在，再开启新的 Codex 会话或检查 hooks 配置中的 `matcher` 是否匹配当前工具名。
+使用 `codex-win install-template --profile strict --target <repo>` 时会自动复制 hooks。安装后如果 Codex 没有触发 hook，先确认 `.codex/hooks.json` 存在，直接运行 hook 命令确认 Python 可导入，再开启新的 Codex 会话或检查 hooks 配置中的 `matcher` 是否匹配当前工具名。
+
+`codex-win body normalize/validate` 是通用正文入口，适用于 PR body、Issue body、评论正文和 release notes；`codex-win pr-body ...` 保留为兼容别名。
 
 ## 验证
 

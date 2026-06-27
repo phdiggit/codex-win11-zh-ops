@@ -50,6 +50,28 @@ class TemplateTests(unittest.TestCase):
             self.assertEqual(0, rc)
             self.assertFalse((target / ".codex" / "hooks.json").exists())
 
+    def test_agents_places_codex_win_commands_in_task_sections(self) -> None:
+        text = (ROOT / "templates" / "repo" / "AGENTS.strict.md").read_text(encoding="utf-8")
+
+        self.assertNotIn("## codex-win 工具优先使用场景", text)
+        self.assertIn("## Shell、编码与路径", text)
+        self.assertIn("codex-win encoding check", text)
+        self.assertIn("codex-win shell lint", text)
+        self.assertIn("## GitHub、Commit 与 PR", text)
+        self.assertIn("codex-win gh preflight", text)
+        self.assertIn("codex-win body normalize/validate", text)
+        self.assertIn("codex-win pr-body ...", text)
+        self.assertIn("codex-win gh pr-create/pr-edit/pr-verify", text)
+        self.assertIn("codex-win agents lint", text)
+        self.assertIn("不静默降级", text)
+
+    def test_workflow_documents_install_edge_cases(self) -> None:
+        text = (ROOT / "templates" / "repo" / "codex-workflow.md").read_text(encoding="utf-8")
+
+        self.assertIn("路径包含空格时必须加引号", text)
+        self.assertIn("python -m codex_win11_zh.hooks.pre_tool_use", text)
+        self.assertIn("matcher", text)
+
 
 if __name__ == "__main__":
     unittest.main()

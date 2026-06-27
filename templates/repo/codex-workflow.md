@@ -59,16 +59,25 @@ python -m json.tool .codex/hooks.json
 codex-win install-template --profile strict --target . --overwrite
 ```
 
-如果安装后当前 Codex 会话仍未触发 hook，开启新的 Codex 会话后再验证。
+路径包含空格时必须加引号，例如 `--target "E:\code\not versioned\testCodex"`；如果当前目录就是目标仓库，优先用 `--target .`。
+
+如果安装后当前 Codex 会话仍未触发 hook，按以下顺序排查：
+
+1. 确认 `.codex/hooks.json` 存在。
+2. 直接运行 `python -m codex_win11_zh.hooks.pre_tool_use`，确认 hook 命令可导入。
+3. 开启新的 Codex 会话后再验证。
+4. 检查 `.codex/hooks.json` 的 `matcher` 是否匹配当前环境中的工具名。
 
 ## PR body 推荐流程
 
 ```powershell
-codex-win pr-body normalize --input draft.md --output .tmp/pr-bodies/body.md
-codex-win pr-body validate .tmp/pr-bodies/body.md
-codex-win gh pr-create --title "<title>" --body-file .tmp/pr-bodies/body.md --base main --head <branch>
-codex-win gh pr-verify --pr <number-or-url> --title "<title>" --body-file .tmp/pr-bodies/body.md --base main --head <branch> --draft false
+codex-win body normalize --input draft.md --output .tmp/bodies/body.md
+codex-win body validate .tmp/bodies/body.md
+codex-win gh pr-create --title "<title>" --body-file .tmp/bodies/body.md --base main --head <branch>
+codex-win gh pr-verify --pr <number-or-url> --title "<title>" --body-file .tmp/bodies/body.md --base main --head <branch> --draft false
 ```
+
+`codex-win body normalize/validate` 适用于 PR body、Issue body、评论正文和 release notes；`codex-win pr-body ...` 是兼容入口。
 
 PR body 至少包含：
 

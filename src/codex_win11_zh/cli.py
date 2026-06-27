@@ -53,7 +53,8 @@ def cmd_encoding_write_json(args: argparse.Namespace) -> int:
 
 def cmd_pr_body_normalize(args: argparse.Namespace) -> int:
     normalize_file(args.input, args.output)
-    print(f"normalized PR body: {args.output}")
+    label = getattr(args, "body_label", "PR body")
+    print(f"normalized {label}: {args.output}")
     return 0
 
 
@@ -65,7 +66,8 @@ def cmd_pr_body_validate(args: argparse.Namespace) -> int:
             if issue.suggestion:
                 print(f"  建议：{issue.suggestion}")
         return 1
-    print("PR body validation passed")
+    label = getattr(args, "body_label", "PR body")
+    print(f"{label} validation passed")
     return 0
 
 
@@ -205,16 +207,20 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--sort-keys", action="store_true")
     p.set_defaults(func=cmd_encoding_write_json)
 
-    prb = sub.add_parser("pr-body", help="PR body 正规化和校验")
-    prb_sub = prb.add_subparsers(dest="pr_body_command", required=True)
-    p = prb_sub.add_parser("normalize")
-    p.add_argument("--input", required=True)
-    p.add_argument("--output", required=True)
-    p.set_defaults(func=cmd_pr_body_normalize)
-    p = prb_sub.add_parser("validate")
-    p.add_argument("path")
-    p.add_argument("--no-required-sections", action="store_true")
-    p.set_defaults(func=cmd_pr_body_validate)
+    def add_body_parser(name: str, *, help_text: str, body_label: str) -> None:
+        body_parser = sub.add_parser(name, help=help_text)
+        body_sub = body_parser.add_subparsers(dest=f"{name.replace('-', '_')}_command", required=True)
+        p = body_sub.add_parser("normalize")
+        p.add_argument("--input", required=True)
+        p.add_argument("--output", required=True)
+        p.set_defaults(func=cmd_pr_body_normalize, body_label=body_label)
+        p = body_sub.add_parser("validate")
+        p.add_argument("path")
+        p.add_argument("--no-required-sections", action="store_true")
+        p.set_defaults(func=cmd_pr_body_validate, body_label=body_label)
+
+    add_body_parser("body", help_text="通用 Markdown 正文正规化和校验", body_label="body")
+    add_body_parser("pr-body", help_text="PR body 正规化和校验", body_label="PR body")
 
     ghp = sub.add_parser("gh", help="Codex 友好的 gh 包装")
     gh_sub = ghp.add_subparsers(dest="gh_command", required=True)

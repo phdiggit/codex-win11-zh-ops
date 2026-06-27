@@ -4,6 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from codex_win11_zh.cli import main
 from codex_win11_zh.pr_body import code_fences_balanced, compare_body, normalize_file, validate_file, validate_text
 
 
@@ -33,6 +34,16 @@ class PrBodyTests(unittest.TestCase):
         self.assertEqual([], compare_body(GOOD, GOOD.rstrip("\n")))
         issues = compare_body(GOOD, GOOD.replace("中文", "乱码"))
         self.assertTrue(any(i.code == "REMOTE_BODY_MISMATCH" for i in issues))
+
+    def test_body_cli_alias_normalizes_and_validates(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            src = Path(td) / "comment-draft.md"
+            dst = Path(td) / "comment-body.md"
+            src.write_bytes(GOOD.replace("\n", "\r\n").encode("utf-8"))
+
+            self.assertEqual(0, main(["body", "normalize", "--input", str(src), "--output", str(dst)]))
+            self.assertEqual(0, main(["body", "validate", str(dst)]))
+            self.assertEqual(GOOD, dst.read_text(encoding="utf-8"))
 
 
 if __name__ == "__main__":
