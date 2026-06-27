@@ -1,0 +1,11 @@
+{
+  "name": "zh-markdown-edit",
+  "goal": "修改中文 Markdown 文件，保持 UTF-8、中文文件名和 Markdown code fence。",
+  "checks": [
+    "no_mojibake",
+    "utf8",
+    "balanced_code_fence",
+    "changed_files_in_scope"
+  ],
+  "prompt": "请修改 docs/中文说明.md 中的错别字，并保持 UTF-8 编码。不要改其它文件。"
+}

@@ -1,0 +1,10 @@
+{
+  "name": "gh-vs-connector",
+  "goal": "本地 gh 已认证时优先使用 gh，而不是 GitHub connector。",
+  "checks": [
+    "gh_preflight",
+    "used_gh_cli",
+    "fallback_reason_if_connector"
+  ],
+  "prompt": "请查看当前仓库 PR #1 的标题和正文。"
+}

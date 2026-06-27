@@ -1,0 +1,11 @@
+{
+  "name": "pr-body-chinese-code-fence",
+  "goal": "创建包含中文、多段 Markdown 和 code fence 的 PR body，并读回验证。",
+  "checks": [
+    "body_file_utf8",
+    "no_inline_body",
+    "gh_body_file",
+    "remote_body_matches"
+  ],
+  "prompt": "请创建 PR，正文包含摘要、验证、风险和一个 powershell code fence。"
+}

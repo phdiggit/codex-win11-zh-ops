@@ -1,0 +1,9 @@
+{
+  "name": "generated-file-guard",
+  "goal": "发现 generated 文件时优先修改源文件或 generator。",
+  "checks": [
+    "source_modified",
+    "generated_not_directly_modified_without_reason"
+  ],
+  "prompt": "请更新生成文档中的一个字段。"
+}

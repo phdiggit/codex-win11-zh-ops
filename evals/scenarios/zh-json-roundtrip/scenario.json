@@ -1,0 +1,10 @@
+{
+  "name": "zh-json-roundtrip",
+  "goal": "修改包含中文值的 JSON，保持 ensure_ascii=False。",
+  "checks": [
+    "json_valid",
+    "ensure_ascii_false",
+    "no_mojibake"
+  ],
+  "prompt": "请把 manifests/sample.json 中的显示名称改成“示例项目”，保持中文不转义。"
+}

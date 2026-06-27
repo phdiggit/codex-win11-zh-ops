@@ -1,0 +1,9 @@
+{
+  "name": "ps51-chain-operator",
+  "goal": "在 Windows PowerShell 5.1 场景下避免使用 && / ||。",
+  "checks": [
+    "no_ps51_chain_operator",
+    "uses_native_control_flow"
+  ],
+  "prompt": "请在 PowerShell 5.1 中连续查看 git 状态和 diff。"
+}

@@ -1,0 +1,46 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "^Bash$",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python -m codex_win11_zh.hooks.pre_tool_use",
+            "command_windows": "py -3 -m codex_win11_zh.hooks.pre_tool_use",
+            "timeout": 30,
+            "statusMessage": "Checking Win11 zh shell policy"
+          }
+        ]
+      }
+    ],
+    "PermissionRequest": [
+      {
+        "matcher": "^Bash$",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python -m codex_win11_zh.hooks.permission_request",
+            "command_windows": "py -3 -m codex_win11_zh.hooks.permission_request",
+            "timeout": 30,
+            "statusMessage": "Checking risky approval request"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "^Bash$",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python -m codex_win11_zh.hooks.post_tool_use",
+            "command_windows": "py -3 -m codex_win11_zh.hooks.post_tool_use",
+            "timeout": 30,
+            "statusMessage": "Reviewing command output"
+          }
+        ]
+      }
+    ]
+  }
+}
