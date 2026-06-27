@@ -50,6 +50,15 @@
 8. `.ps1` 文件如需要兼容 Windows PowerShell 5.1 中文输出，可使用 UTF-8 BOM。
 9. 自动化目录尽量使用英文、数字、短横线，避免 WinPE、cmd、SMB 和日志编码问题。
 
+## codex-win 工具优先使用场景
+
+1. 接手仓库或准备 GitHub 操作前，优先运行 `codex-win preflight` 或 `codex-win gh preflight` 判断本地 `gh`、认证和仓库状态。
+2. 处理中文 Markdown、JSON、PR body、评论正文、release notes 时，优先使用 `codex-win encoding check`、`codex-win encoding write-json`、`codex-win pr-body normalize` 和 `codex-win pr-body validate`。
+3. 在 Windows PowerShell 5.1 中准备执行复杂命令前，优先用 `codex-win shell lint --shell powershell5 --command "<command>"` 检查 `&&`、`||`、Bash here-doc 和 inline `gh --body` 风险。
+4. 创建、编辑或验证 PR 时，优先使用 `codex-win gh pr-create/pr-edit/pr-verify`；如果直接使用 `gh`，仍必须先通过 `codex-win pr-body validate`，并在写入后读回验证。
+5. 修改 `AGENTS.md`、任务卡或模板后，运行 `codex-win agents lint AGENTS.md` 或目标模板路径。
+6. 只有在 `codex-win` 不可用、当前任务不属于以上风险场景，或用户明确要求时，才直接使用原生命令替代。
+
 ## GitHub、Commit 与 PR
 
 1. 当前仓库本地存在且 `gh` 已认证时，GitHub 远端读写默认优先使用 `gh`。

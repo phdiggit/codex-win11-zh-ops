@@ -33,7 +33,7 @@ class TemplateTests(unittest.TestCase):
     def test_install_template_copies_repo_guardrails(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             target = Path(td) / "target"
-            rc = main(["install-template", "--profile", "strict", "--target", str(target), "--hooks"])
+            rc = main(["install-template", "--profile", "strict", "--target", str(target)])
 
             self.assertEqual(0, rc)
             self.assertTrue((target / "AGENTS.md").exists())
@@ -41,6 +41,14 @@ class TemplateTests(unittest.TestCase):
             self.assertTrue((target / "docs" / "codex-workflow.md").exists())
             self.assertTrue((target / "docs" / "codex-task-card-template.md").exists())
             self.assertTrue((target / ".codex" / "hooks.json").exists())
+
+    def test_install_template_no_hooks_can_disable_strict_hooks(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            target = Path(td) / "target"
+            rc = main(["install-template", "--profile", "strict", "--target", str(target), "--no-hooks"])
+
+            self.assertEqual(0, rc)
+            self.assertFalse((target / ".codex" / "hooks.json").exists())
 
 
 if __name__ == "__main__":

@@ -59,6 +59,12 @@ codex-win install-template --profile balanced --target C:\path\to\repo
 codex-win install-template --profile strict --target C:\path\to\repo
 ```
 
+`strict` profile 默认会安装 `.codex/hooks.json`；如需显式关闭 hooks，可加 `--no-hooks`。`balanced` profile 默认不安装 hooks，需要时加 `--hooks`。目标目录已有模板文件时，加 `--overwrite` 更新：
+
+```powershell
+codex-win install-template --profile strict --target C:\path\to\repo --overwrite
+```
+
 维护模板时，根目录 `templates/` 与包内 `src/codex_win11_zh/templates/` 必须保持一致；`python -m unittest discover -s tests` 会检查两份模板是否同步。
 
 ## 主要 CLI
@@ -94,6 +100,8 @@ codex-win evals report --output reports/local.json
 ```powershell
 python -m codex_win11_zh.hooks.pre_tool_use
 ```
+
+使用 `codex-win install-template --profile strict --target <repo>` 时会自动复制 hooks。安装后如果 Codex 没有触发 hook，先确认 `.codex/hooks.json` 存在，再开启新的 Codex 会话或检查 hooks 配置中的 `matcher` 是否匹配当前工具名。
 
 ## 验证
 

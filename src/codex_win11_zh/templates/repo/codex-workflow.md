@@ -53,6 +53,14 @@ python -m json.tool .codex/hooks.json
 
 `shell lint` 对 Windows PowerShell 5.1 的 `&&` 返回错误是预期结果。安装 hooks 后，在 Codex 中尝试一条只读命令 `git status && git diff`；如果未被拦截，检查 `.codex/hooks.json` 的 `matcher` 是否匹配当前环境中的工具名。
 
+`strict` profile 默认安装 `.codex/hooks.json`。如果是在已有项目中补装或更新模板，使用：
+
+```powershell
+codex-win install-template --profile strict --target . --overwrite
+```
+
+如果安装后当前 Codex 会话仍未触发 hook，开启新的 Codex 会话后再验证。
+
 ## PR body 推荐流程
 
 ```powershell

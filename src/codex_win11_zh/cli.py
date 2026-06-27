@@ -149,6 +149,7 @@ def cmd_install_template(args: argparse.Namespace) -> int:
     target.mkdir(parents=True, exist_ok=True)
 
     profile = args.profile
+    install_hooks = args.hooks if args.hooks is not None else profile == "strict"
     repo_dir = base / "repo"
     if profile == "strict":
         root_agents = repo_dir / "AGENTS.strict.md"
@@ -161,7 +162,7 @@ def cmd_install_template(args: argparse.Namespace) -> int:
     _copy_file(repo_dir / "scripts_AGENTS.md", target / "scripts" / "AGENTS.md", overwrite=args.overwrite)
     _copy_file(repo_dir / "codex-workflow.md", target / "docs" / "codex-workflow.md", overwrite=args.overwrite)
     _copy_file(repo_dir / "codex-task-card-template.md", target / "docs" / "codex-task-card-template.md", overwrite=args.overwrite)
-    if args.hooks:
+    if install_hooks:
         _copy_file(base / "hooks" / "hooks.json", target / ".codex" / "hooks.json", overwrite=args.overwrite)
 
     print(f"installed {profile} template into {target}")
@@ -269,7 +270,9 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("install-template", help="复制 AGENTS/hooks 模板到目标仓库")
     p.add_argument("--profile", choices=["balanced", "strict"], default="balanced")
     p.add_argument("--target", required=True)
-    p.add_argument("--hooks", action="store_true", help="同时复制 .codex/hooks.json")
+    hooks = p.add_mutually_exclusive_group()
+    hooks.add_argument("--hooks", dest="hooks", action="store_true", default=None, help="同时复制 .codex/hooks.json")
+    hooks.add_argument("--no-hooks", dest="hooks", action="store_false", help="不复制 .codex/hooks.json")
     p.add_argument("--overwrite", action="store_true")
     p.set_defaults(func=cmd_install_template)
 
