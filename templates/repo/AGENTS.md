@@ -57,11 +57,12 @@
 3. 不要对同一 Issue、PR、评论重复使用多个接口写入。
 4. 中文、多行 Markdown、code fence、反引号正文必须先写 `.tmp/pr-bodies/*.md` UTF-8 文件，再用 `gh --body-file`。
 5. 创建或更新 PR 后必须读回 title、body、base、head、Draft 状态并验证中文未损坏。
-6. 默认基于仓库默认分支创建 `codex/<short-task>` 分支。
-7. 一个任务卡对应一个分支和一个 PR。
-8. Commit 必须是原子的，不机械拆分无意义 commit。
-9. 提交前用 `git -c core.quotepath=false diff --name-only` 和 `git ls-files --others --exclude-standard` 核对文件。
-10. 提交后用 `git -c core.quotepath=false diff --name-only origin/<base>...HEAD` 核对 PR 相对基线的 changed files。
+6. 阶段性或部分交付 PR 使用 `Refs #<issue>`；只有任务卡明确允许完整关闭时才使用 `Closes/Fixes/Resolves #<issue>`。
+7. 默认基于仓库默认分支创建 `codex/<short-task>` 分支。
+8. 一个任务卡对应一个分支和一个 PR。
+9. Commit 必须是原子的，不机械拆分无意义 commit。
+10. 提交前用 `git -c core.quotepath=false diff --name-only` 和 `git ls-files --others --exclude-standard` 核对文件。
+11. 提交后用 `git -c core.quotepath=false diff --name-only origin/<base>...HEAD` 核对 PR 相对基线的 changed files。
 
 ## 工作区保护
 

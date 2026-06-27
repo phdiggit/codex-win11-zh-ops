@@ -43,7 +43,7 @@ codex-win agents lint AGENTS.md
 ```text
 templates/
   global/      用户全局 AGENTS 模板
-  repo/        项目根与子目录 AGENTS 模板
+  repo/        项目根与子目录 AGENTS、workflow、任务卡和 .gitattributes 模板
   hooks/       Codex hooks 配置模板
 ```
 
@@ -58,6 +58,8 @@ codex-win install-template --profile balanced --target C:\path\to\repo
 ```powershell
 codex-win install-template --profile strict --target C:\path\to\repo
 ```
+
+维护模板时，根目录 `templates/` 与包内 `src/codex_win11_zh/templates/` 必须保持一致；`python -m unittest discover -s tests` 会检查两份模板是否同步。
 
 ## 主要 CLI
 

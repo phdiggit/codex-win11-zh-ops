@@ -42,6 +42,17 @@ git ls-files --others --exclude-standard
 - 不通过 PowerShell 管道或命令行字符串直接传中文正文。
 - 中文路径和 changed files 使用 `git -c core.quotepath=false`。
 
+## 模板安装后自检
+
+```powershell
+codex-win preflight
+codex-win agents lint AGENTS.md
+codex-win shell lint --shell powershell5 --command "git status && git diff"
+python -m json.tool .codex/hooks.json
+```
+
+`shell lint` 对 Windows PowerShell 5.1 的 `&&` 返回错误是预期结果。安装 hooks 后，在 Codex 中尝试一条只读命令 `git status && git diff`；如果未被拦截，检查 `.codex/hooks.json` 的 `matcher` 是否匹配当前环境中的工具名。
+
 ## PR body 推荐流程
 
 ```powershell

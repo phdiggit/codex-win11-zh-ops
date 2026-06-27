@@ -32,4 +32,4 @@ include-package-data = true
 where = ["src"]
 
 [tool.setuptools.package-data]
-codex_win11_zh = ["templates/**/*"]
+codex_win11_zh = ["templates/**/*", "templates/repo/.gitattributes"]

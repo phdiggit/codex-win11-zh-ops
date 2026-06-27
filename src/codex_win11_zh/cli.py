@@ -156,6 +156,7 @@ def cmd_install_template(args: argparse.Namespace) -> int:
         root_agents = repo_dir / "AGENTS.md"
 
     _copy_file(root_agents, target / "AGENTS.md", overwrite=args.overwrite)
+    _copy_file(repo_dir / ".gitattributes", target / ".gitattributes", overwrite=args.overwrite)
     _copy_file(repo_dir / "docs_AGENTS.md", target / "docs" / "AGENTS.md", overwrite=args.overwrite)
     _copy_file(repo_dir / "scripts_AGENTS.md", target / "scripts" / "AGENTS.md", overwrite=args.overwrite)
     _copy_file(repo_dir / "codex-workflow.md", target / "docs" / "codex-workflow.md", overwrite=args.overwrite)
