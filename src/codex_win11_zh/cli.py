@@ -226,6 +226,7 @@ def cmd_review_pack(args: argparse.Namespace) -> int:
             package_file=args.package_file,
             body_file=args.body_file,
             section=args.section,
+            command_log=args.command_log,
             cwd=args.cwd,
             require_sections=not args.no_required_sections,
         )

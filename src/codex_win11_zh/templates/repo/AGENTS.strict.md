@@ -57,7 +57,7 @@
 3. 不要对同一 Issue、PR、评论重复使用多个接口写入。
 4. 中文、多行 Markdown、code fence、反引号正文必须先写 `.tmp/bodies/*.md` UTF-8 文件，先运行 `codex-win body normalize/validate`，再用 `codex-win body apply --pr <pr> --body-file <file>` 或 `gh --body-file`；PR body 也可使用兼容入口 `codex-win pr-body ...`。
 5. 创建、编辑或验证 PR 时，优先使用 `codex-win gh pr-create/pr-edit/pr-verify`；如果直接使用 `gh`，仍必须先通过 `codex-win body validate`，并读回 title、body、base、head、Draft 状态验证中文未损坏。复杂 JSON 检查不要在 PowerShell 中拼 `gh --jq`，优先用 `codex-win gh pr-view`、Python JSON 解析或工具自带 verify。
-6. 需要 PR Review Package 时，可用 `codex-win review-pack --pr <pr> --base <base> --output .tmp/review-pack.md` 生成机械事实层；用 `codex-win review-pack apply --pr <pr> --package-file .tmp/review-pack.md --body-file .tmp/pr-body.md` 写回；它只辅助核对 HEAD snapshot、scope 和协议，不替代 reviewer 的 findings、风险判断或 merge 决策。
+6. 需要 PR Review Package 时，可用 `codex-win review-pack --pr <pr> --base <base> --output .tmp/review-pack.md` 生成机械事实层；用 `codex-win review-pack apply --pr <pr> --package-file .tmp/review-pack.md --body-file .tmp/pr-body.md --command-log <commands.json>` 写回并同步验证 metadata；没有 scope profile 时 `scope_verdict: unclassified` 不代表业务范围已通过；它只辅助核对 HEAD snapshot、scope 和协议，不替代 reviewer 的 findings、风险判断或 merge 决策。
 7. 不要优先回退到仓库本地 PR body 脚本；只有 `codex-win` 不可用或项目明确要求时才使用 repo-local body tool，并说明原因。
 8. 阶段性或部分交付 PR 使用 `Refs #<issue>`；只有任务卡明确允许完整关闭时才使用 `Closes/Fixes/Resolves #<issue>`。
 9. 默认基于仓库默认分支创建 `codex/<short-task>` 分支；一个任务卡对应一个分支和一个 PR。

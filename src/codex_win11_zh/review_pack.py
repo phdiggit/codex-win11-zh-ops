@@ -29,6 +29,7 @@ PACKAGE_SECTIONS = [
     "## Scope / Ownership",
     "## Commands Run",
     "## Protocol Compliance",
+    "## Required Next Actions",
     "## Findings",
     "## Failed Checks Classification",
     "## Anti-bloat / Lifecycle Notes",
@@ -94,7 +95,7 @@ def classify_scope(changed_files: list[str], *, config: dict[str, Any], profile_
             "in_scope": normalized,
             "suspicious_or_out_of_scope": [],
             "forbidden_hits": [],
-            "scope_verdict": "clean",
+            "scope_verdict": "unclassified",
             "note": "no scope profile supplied; all changed files are listed as in_scope without ownership judgment",
         }
 
@@ -356,7 +357,8 @@ def build_quick_summary(*, scope: dict[str, Any], protocol: dict[str, Any], comm
     head_status_map = {"pass": "current", "fail": "stale", "unknown": "unknown"}
     validation = commands.get("validation_summary", {}) if isinstance(commands, dict) else {}
     return {
-        "head_status": head_status_map.get(protocol["head_sha_matches_current_head"]["status"], "unknown"),
+        "head_status_at_generation": head_status_map.get(protocol["head_sha_matches_current_head"]["status"], "unknown"),
+        "head_status_after_apply": "unknown",
         "scope_verdict": str(scope["scope_verdict"]),
         "validation_summary": str(validation.get("validation_summary", "unknown")),
         "pr_induced_failures": str(validation.get("pr_induced_failures", "unknown")),
@@ -377,7 +379,8 @@ def render_review_pack(data: dict[str, Any]) -> str:
         "",
         "## Reviewer Quick Summary",
         "",
-        f"- head_status: `{quick_summary['head_status']}`",
+        f"- head_status_at_generation: `{quick_summary['head_status_at_generation']}`",
+        f"- head_status_after_apply: `{quick_summary['head_status_after_apply']}`",
         f"- scope_verdict: `{quick_summary['scope_verdict']}`",
         f"- validation_summary: `{quick_summary['validation_summary']}`",
         f"- pr_induced_failures: `{quick_summary['pr_induced_failures']}`",
@@ -420,15 +423,16 @@ def render_review_pack(data: dict[str, Any]) -> str:
             "",
             "## Commands Run",
             "",
-            *_validation_summary_lines(commands),
-            "",
-            "```json",
-            json.dumps(commands, ensure_ascii=False, indent=2),
-            "```",
+            *_commands_run_lines(commands),
             "",
             "## Protocol Compliance",
             "",
             *_protocol_lines(protocol),
+            "",
+            "## Required Next Actions",
+            "",
+            "- Review project-specific findings manually.",
+            "- Wait for remote checks unless supplied in command log.",
             "",
             "## Findings",
             "",
@@ -473,6 +477,16 @@ def _protocol_lines(protocol: dict[str, Any]) -> list[str]:
         if item.get("missing"):
             lines.extend(f"  - missing: `{path}`" for path in item["missing"])
     return lines
+
+
+def _commands_run_lines(commands: dict[str, Any]) -> list[str]:
+    return [
+        *_validation_summary_lines(commands),
+        "",
+        "```json",
+        json.dumps(commands, ensure_ascii=False, indent=2),
+        "```",
+    ]
 
 
 def _validation_summary_lines(commands: dict[str, Any]) -> list[str]:
@@ -542,6 +556,149 @@ def write_review_pack(path: str | Path, markdown: str) -> None:
     write_utf8_no_bom(output, normalize_text(markdown))
 
 
+def update_review_pack_for_apply(package_text: str, *, command_log: str | Path | None = None) -> str:
+    updated = normalize_text(package_text)
+    if command_log is not None:
+        commands = load_command_summary(command_log)
+        validation = commands["validation_summary"]
+        updated = _replace_section_body(updated, "Commands Run", _commands_run_lines(commands))
+        updated = _set_quick_summary_value(updated, "validation_summary", str(validation.get("validation_summary", "unknown")))
+        updated = _set_quick_summary_value(updated, "pr_induced_failures", str(validation.get("pr_induced_failures", "unknown")))
+        updated = _set_quick_summary_value(updated, "fixed_baseline_failures", str(validation.get("fixed_baseline_failures", "unknown")))
+    else:
+        metadata = _existing_validation_metadata(updated)
+        if metadata:
+            for key, value in metadata.items():
+                updated = _set_quick_summary_value(updated, key, value)
+                updated = _set_section_metadata_value(updated, "Commands Run", key, value)
+            updated = _sync_commands_json_metadata(updated, metadata)
+    return _set_quick_summary_value(updated, "head_status_after_apply", "current")
+
+
+def _replace_section_body(text: str, section: str, body_lines: list[str]) -> str:
+    bounds = _heading_bounds(text, section)
+    if bounds is None:
+        raise ValueError(f"review package does not contain section marker: {section}")
+    lines = text.splitlines()
+    start, end = bounds
+    merged = [*lines[: start + 1], "", *body_lines, *lines[end:]]
+    return normalize_text("\n".join(merged))
+
+
+def _set_quick_summary_value(text: str, key: str, value: str) -> str:
+    bounds = _heading_bounds(text, "Reviewer Quick Summary")
+    if bounds is None:
+        raise ValueError("review package does not contain section marker: Reviewer Quick Summary")
+    lines = text.splitlines()
+    start, end = bounds
+    replacement = f"- {key}: `{value}`"
+    for index in range(start + 1, end):
+        if re.match(rf"^\s*-\s+{re.escape(key)}\s*:", lines[index]):
+            lines[index] = replacement
+            return normalize_text("\n".join(lines))
+    insert_at = start + 1
+    while insert_at < end and not lines[insert_at].strip():
+        insert_at += 1
+    lines.insert(insert_at, replacement)
+    return normalize_text("\n".join(lines))
+
+
+VALIDATION_METADATA_KEYS = ("validation_summary", "pr_induced_failures", "fixed_baseline_failures")
+
+
+def _existing_validation_metadata(text: str) -> dict[str, str]:
+    commands_metadata = _section_metadata(text, "Commands Run")
+    summary_metadata = _section_metadata(text, "Reviewer Quick Summary")
+    merged: dict[str, str] = {}
+    for key in VALIDATION_METADATA_KEYS:
+        commands_value = commands_metadata.get(key)
+        summary_value = summary_metadata.get(key)
+        if commands_value and commands_value != "unknown":
+            merged[key] = commands_value
+        elif summary_value and summary_value != "unknown":
+            merged[key] = summary_value
+        elif commands_value:
+            merged[key] = commands_value
+        elif summary_value:
+            merged[key] = summary_value
+    return merged
+
+
+def _section_metadata(text: str, section: str) -> dict[str, str]:
+    bounds = _heading_bounds(text, section)
+    if bounds is None:
+        return {}
+    lines = text.splitlines()
+    metadata: dict[str, str] = {}
+    for line in lines[bounds[0] + 1 : bounds[1]]:
+        match = re.match(r"^\s*-\s+([A-Za-z0-9_]+)\s*:\s*`?([^`]+?)`?\s*$", line)
+        if match and match.group(1) in VALIDATION_METADATA_KEYS:
+            metadata[match.group(1)] = match.group(2).strip()
+    return metadata
+
+
+def _set_section_metadata_value(text: str, section: str, key: str, value: str) -> str:
+    bounds = _heading_bounds(text, section)
+    if bounds is None:
+        raise ValueError(f"review package does not contain section marker: {section}")
+    lines = text.splitlines()
+    start, end = bounds
+    replacement = f"- {key}: `{value}`"
+    for index in range(start + 1, end):
+        if re.match(rf"^\s*-\s+{re.escape(key)}\s*:", lines[index]):
+            lines[index] = replacement
+            return normalize_text("\n".join(lines))
+    insert_at = start + 1
+    while insert_at < end and not lines[insert_at].strip():
+        insert_at += 1
+    lines.insert(insert_at, replacement)
+    return normalize_text("\n".join(lines))
+
+
+def _sync_commands_json_metadata(text: str, metadata: dict[str, str]) -> str:
+    bounds = _heading_bounds(text, "Commands Run")
+    if bounds is None:
+        raise ValueError("review package does not contain section marker: Commands Run")
+    lines = text.splitlines()
+    start, end = bounds
+    fence_start = None
+    fence_end = None
+    for index in range(start + 1, end):
+        if lines[index].strip() == "```json":
+            fence_start = index
+            break
+    if fence_start is None:
+        return text
+    for index in range(fence_start + 1, end):
+        if lines[index].strip() == "```":
+            fence_end = index
+            break
+    if fence_end is None:
+        return text
+    try:
+        payload = json.loads("\n".join(lines[fence_start + 1 : fence_end]))
+    except json.JSONDecodeError:
+        return text
+    if not isinstance(payload, dict):
+        return text
+
+    summary = payload.get("validation_summary")
+    if isinstance(summary, dict):
+        summary.update(metadata)
+    elif "validation_summary" in metadata:
+        payload["validation_summary"] = metadata["validation_summary"]
+    if not isinstance(summary, dict):
+        fallback = payload.get("validation_metadata")
+        if not isinstance(fallback, dict):
+            fallback = {}
+            payload["validation_metadata"] = fallback
+        fallback.update(metadata)
+
+    rendered = json.dumps(payload, ensure_ascii=False, indent=2).splitlines()
+    updated_lines = [*lines[: fence_start + 1], *rendered, *lines[fence_end:]]
+    return normalize_text("\n".join(updated_lines))
+
+
 def splice_review_pack_into_body(body: str, package_text: str, *, section: str = REVIEW_PACK_SECTION_TITLE) -> str:
     normalized_body = normalize_text(body) if body.strip() else ""
     normalized_package = normalize_text(package_text)
@@ -598,10 +755,12 @@ def prepare_review_pack_body(
     package_file: str | Path,
     body_file: str | Path | None = None,
     section: str = REVIEW_PACK_SECTION_TITLE,
+    command_log: str | Path | None = None,
     cwd: str | Path | None = None,
 ) -> dict[str, Any]:
     view = pr_view(pr, cwd=cwd)
     package_text = read_text_auto(package_file).text
+    package_text = update_review_pack_for_apply(package_text, command_log=command_log)
     head_sha = str(view.get("headRefOid") or "")
     if head_sha and head_sha not in package_text:
         raise ValueError(f"review package does not contain current head SHA: {head_sha}")
@@ -617,10 +776,18 @@ def apply_review_pack_to_pr(
     package_file: str | Path,
     body_file: str | Path | None = None,
     section: str = REVIEW_PACK_SECTION_TITLE,
+    command_log: str | Path | None = None,
     cwd: str | Path | None = None,
     require_sections: bool = True,
 ) -> dict[str, Any]:
-    prepared = prepare_review_pack_body(pr=pr, package_file=package_file, body_file=body_file, section=section, cwd=cwd)
+    prepared = prepare_review_pack_body(
+        pr=pr,
+        package_file=package_file,
+        body_file=body_file,
+        section=section,
+        command_log=command_log,
+        cwd=cwd,
+    )
     view = pr_body_apply(pr=pr, body_file=prepared["body_file"], cwd=cwd, require_sections=require_sections)
     remote_body = str(view.get("body") or "")
     if _heading_bounds(remote_body, section) is None:
