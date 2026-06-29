@@ -134,12 +134,12 @@ codex-win run --log .tmp/codex-commands.jsonl --summary "focused validation" -- 
 跨多条命令的任务 wall time 可用轻量 timer 记录：
 
 ```powershell
-codex-win timer start --id issue390-b2 --state .tmp/codex-timer.json
-codex-win timer mark --id issue390-b2 --label evidence_drafting --state .tmp/codex-timer.json
-codex-win timer finish --id issue390-b2 --state .tmp/codex-timer.json --command-log .tmp/codex-commands.jsonl --output .tmp/codex-timing.json
+codex-win timer start --id task-review --state .tmp/codex-timer.json
+codex-win timer mark --id task-review --label focused_validation --state .tmp/codex-timer.json
+codex-win timer finish --id task-review --state .tmp/codex-timer.json --command-log .tmp/codex-commands.jsonl --output .tmp/codex-timing.json
 ```
 
-`timer finish` 输出会分开写明 measured task wall time、measured command time、unmeasured time 和 qualitative notes。未单独测量的人工/推理时间保持 `unknown`，工具不会用 wall time 减 command time 推断“人工耗时”。PR body 中的 timing 必须来自这些测量记录，或明确写 `precise timing unavailable`；不要从感觉写 `total_codex_wall_time` 分钟数。
+`timer finish` 输出会分开写明 measured task wall time、measured command time、unmeasured time 和 qualitative notes。未单独测量的人工/推理时间保持 `unknown`，工具不会用 wall time 减 command time 推断“人工耗时”。PR body 中的 timing 必须来自这些测量记录，或明确写 `precise timing unavailable`；不要凭感觉写精确分钟数。
 
 ## 生成物清理
 
@@ -179,12 +179,12 @@ codex-win test plan --base origin/main --head HEAD --changed-files .tmp/changed-
 
 ## PR Review Package
 
-`codex-win review-pack` 生成 Codex PR Review Package 的机械事实层，包括 HEAD snapshot、changed files、scope profile 分类、PR body 协议检查、命令日志摘要和人工 findings 占位。它不做 merge 决策，不推断业务语义，也不判断评分、rubric 或 evidence 正确性。
+`codex-win review-pack` 生成 Codex PR Review Package 的机械事实层，包括 HEAD snapshot、changed files、scope profile 分类、PR body 协议检查、命令日志摘要和人工 findings 占位。它不做 merge 决策，不推断业务语义，也不判断项目特定验收标准或产物正确性。
 
 基本用法：
 
 ```powershell
-codex-win review-pack --pr 388 --base GPT --scope-profile governance --output .tmp/review-pack.md
+codex-win review-pack --pr <pr> --base main --scope-profile docs --output .tmp/review-pack.md
 ```
 
 生成包顶部包含 `## Reviewer Quick Summary`，用事实字段提示 `head_status_at_generation`、`head_status_after_apply`、`scope_verdict`、`validation_summary`、`pr_induced_failures`、`fixed_baseline_failures`，并固定写明 `merge_judgment: not_provided_by_tool`。未提供 `--scope-profile` 时，`scope_verdict` 会输出 `unclassified`；这只表示工具没有做 ownership judgment，不表示业务范围已经通过审查。
@@ -194,10 +194,10 @@ codex-win review-pack --pr 388 --base GPT --scope-profile governance --output .t
 ```json
 {
   "scope_profiles": {
-    "data-jsonl": {
-      "allow": ["data/**", "tests/**"],
-      "suspicious": ["AGENTS.md", "docs/**", "scripts/**", "exports/**"],
-      "forbid": ["data/configs/**", "project_config.yml"]
+    "docs": {
+      "allow": ["docs/**", "README.md", "tests/**"],
+      "suspicious": ["src/**", "templates/**"],
+      "forbid": [".github/workflows/**"]
     }
   }
 }
@@ -233,12 +233,12 @@ review package 会额外渲染 `## Timing`：
 - timing_confidence: `unavailable`
 ```
 
-只有 command log 或 timer output 中存在测量数据时，字段才会变成具体秒数；未测量时不会生成 per-person 或 per-phase 估算。
+只有 command log 或 timer output 中存在测量数据时，字段才会变成具体秒数；未测量时不会生成细分耗时估算。
 
 写回 PR body 时，先生成 review package，再把 package splice 到现有正文中，最后通过 `gh --body-file` 写回并读回验证：
 
 ```powershell
-codex-win review-pack apply --pr 388 --package-file .tmp/review-pack.md --body-file .tmp/pr-body.md --command-log commands.json
+codex-win review-pack apply --pr <pr> --package-file .tmp/review-pack.md --body-file .tmp/pr-body.md --command-log commands.json
 ```
 
 `review-pack apply` 写回前会把 `head_status_after_apply` 更新为 `current`。如果提供 `--command-log`，它会用同一份日志重写 `## Commands Run` 的人工摘要和 JSON block，并同步 quick summary；如果没有日志，但 package 中已有人工填写的验证摘要行，apply 也会把这些 metadata 同步进同一 JSON block，避免同一节出现两套验证事实。
@@ -247,7 +247,7 @@ codex-win review-pack apply --pr 388 --package-file .tmp/review-pack.md --body-f
 
 ```powershell
 codex-win body validate .tmp/pr-body.md
-codex-win body apply --pr 388 --body-file .tmp/pr-body.md
+codex-win body apply --pr <pr> --body-file .tmp/pr-body.md
 ```
 
 `review-pack apply` 会替换已有 `# Codex PR Review Package` section；正文侧也兼容旧的 `## Codex PR Review Package v1.1` section，避免追加第二份 review package。写回时会保留 PR body 其它内容，并验证远端正文包含当前 head SHA 和 package marker。生成的 package 默认包含 `## Required Next Actions`，提醒 reviewer 手动审查项目特定 findings，并等待远端检查，除非这些检查已经由 command log 明确提供。

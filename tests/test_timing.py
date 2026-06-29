@@ -38,14 +38,14 @@ class TimingTests(unittest.TestCase):
             command_log = Path(td) / "commands.jsonl"
             append_jsonl(command_log, {"command": "focused", "result": "passed", "exit_code": 0, "duration_sec": 2.5})
 
-            start_rc = main(["timer", "start", "--id", "issue8", "--state", str(state), "--note", "started"])
-            mark_rc = main(["timer", "mark", "--id", "issue8", "--state", str(state), "--label", "validation"])
+            start_rc = main(["timer", "start", "--id", "task-demo", "--state", str(state), "--note", "started"])
+            mark_rc = main(["timer", "mark", "--id", "task-demo", "--state", str(state), "--label", "validation"])
             finish_rc = main(
                 [
                     "timer",
                     "finish",
                     "--id",
-                    "issue8",
+                    "task-demo",
                     "--state",
                     str(state),
                     "--command-log",
@@ -62,7 +62,7 @@ class TimingTests(unittest.TestCase):
         self.assertEqual(0, start_rc)
         self.assertEqual(0, mark_rc)
         self.assertEqual(0, finish_rc)
-        self.assertEqual("issue8", data["id"])
+        self.assertEqual("task-demo", data["id"])
         self.assertEqual("measured", data["timing"]["measured_task_wall_time"]["status"])
         self.assertEqual("measured", data["timing"]["measured_command_time"]["status"])
         self.assertEqual(2.5, data["timing"]["measured_command_time"]["duration_sec"])

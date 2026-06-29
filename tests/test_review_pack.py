@@ -52,24 +52,24 @@ class ReviewPackTests(unittest.TestCase):
     def test_scope_profile_classifies_forbidden_and_suspicious_files(self) -> None:
         config = {
             "scope_profiles": {
-                "data-jsonl": {
-                    "allow": ["data/**", "tests/**"],
-                    "suspicious": ["docs/**", "exports/**"],
-                    "forbid": ["data/configs/**", "project_config.yml"],
+                "docs": {
+                    "allow": ["docs/**", "tests/**"],
+                    "suspicious": ["src/**", "exports/**"],
+                    "forbid": [".github/workflows/**", "pyproject.toml"],
                 }
             }
         }
 
         result = classify_scope(
-            ["data/items.jsonl", "docs/guide.md", "data/configs/prod.json", "README.md"],
+            ["docs/guide.md", "src/app.py", ".github/workflows/ci.yml", "README.md"],
             config=config,
-            profile_name="data-jsonl",
+            profile_name="docs",
         )
 
         self.assertEqual("blocked", result["scope_verdict"])
-        self.assertEqual(["data/items.jsonl"], result["in_scope"])
-        self.assertEqual(["docs/guide.md", "README.md"], result["suspicious_or_out_of_scope"])
-        self.assertEqual(["data/configs/prod.json"], result["forbidden_hits"])
+        self.assertEqual(["docs/guide.md"], result["in_scope"])
+        self.assertEqual(["src/app.py", "README.md"], result["suspicious_or_out_of_scope"])
+        self.assertEqual([".github/workflows/ci.yml"], result["forbidden_hits"])
 
     def test_scope_without_profile_keeps_fact_layer_broad(self) -> None:
         result = classify_scope(["README.md"], config={}, profile_name=None)
@@ -81,9 +81,9 @@ class ReviewPackTests(unittest.TestCase):
     def test_missing_scope_profile_diagnostic_lists_available_profiles(self) -> None:
         config = {"scope_profiles": {"docs": {"allow": ["docs/**"]}, "tests": {"allow": ["tests/**"]}}}
 
-        message = format_missing_scope_profile("governance", config)
+        message = format_missing_scope_profile("unknown-profile", config)
 
-        self.assertIn("governance", message)
+        self.assertIn("unknown-profile", message)
         self.assertIn("docs, tests", message)
         self.assertIn("omit --scope-profile", message)
 

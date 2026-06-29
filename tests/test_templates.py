@@ -69,7 +69,7 @@ class TemplateTests(unittest.TestCase):
         self.assertIn("codex-win gh pr-create/pr-edit/pr-verify", text)
         self.assertIn("codex-win review-pack", text)
         self.assertIn("codex-win review-pack apply", text)
-        self.assertIn("total_codex_wall_time", text)
+        self.assertIn("不要凭感觉写精确分钟数", text)
         self.assertIn("precise timing unavailable", text)
         self.assertIn("codex-win timer start/mark/finish", text)
         self.assertIn("gh --jq", text)
