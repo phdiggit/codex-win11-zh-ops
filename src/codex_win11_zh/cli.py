@@ -15,6 +15,8 @@ from .encoding import read_text_auto, roundtrip_check, write_json_utf8
 from .evals import build_report, load_scenarios
 from .gh import preflight as gh_preflight, pr_create, pr_edit, pr_view, verify_pr_view
 from .pr_body import normalize_file, validate_file
+from .review_pack import DEFAULT_CONFIG as REVIEW_PACK_DEFAULT_CONFIG
+from .review_pack import collect_review_pack, render_review_pack, write_review_pack
 from .runtime import run_command
 from .shell import format_issues, lint_command
 from .stdio import configure_utf8_stdio
@@ -193,6 +195,21 @@ def cmd_test_plan(args: argparse.Namespace) -> int:
         print("")
     if args.format in {"json", "both"}:
         print_json(plan.data)
+    return 0
+
+
+def cmd_review_pack(args: argparse.Namespace) -> int:
+    data = collect_review_pack(
+        pr=args.pr,
+        base=args.base,
+        scope_profile=args.scope_profile,
+        config_path=args.config,
+        command_log=args.command_log,
+        cwd=args.cwd,
+    )
+    markdown = render_review_pack(data)
+    write_review_pack(args.output, markdown)
+    print(f"wrote review package: {args.output}")
     return 0
 
 
@@ -379,6 +396,16 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--record-base-full", choices=["passed", "failed"], default=None)
     p.add_argument("--format", choices=["both", "json", "text"], default="both")
     p.set_defaults(func=cmd_test_plan)
+
+    p = sub.add_parser("review-pack", help="生成 Codex PR Review Package 事实层")
+    p.add_argument("--pr", required=True)
+    p.add_argument("--base", required=True)
+    p.add_argument("--scope-profile", default=None)
+    p.add_argument("--config", default=REVIEW_PACK_DEFAULT_CONFIG)
+    p.add_argument("--command-log", default=None)
+    p.add_argument("--output", required=True)
+    p.add_argument("--cwd", default=None)
+    p.set_defaults(func=cmd_review_pack)
 
     ag = sub.add_parser("agents", help="AGENTS.md 检查")
     ag_sub = ag.add_subparsers(dest="agents_command", required=True)

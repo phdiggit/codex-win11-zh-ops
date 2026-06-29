@@ -41,6 +41,9 @@ codex-win test plan --base origin/main --head HEAD --format text
 # dry-run 检查生成物清理范围
 codex-win cleanup generated --profile markdown-exports --target .
 
+# 生成 PR review package 的机械事实层
+codex-win review-pack --pr 3 --base main --output .tmp/review-pack.md
+
 # 检查 AGENTS.md 是否包含核心约束
 codex-win agents lint AGENTS.md
 ```
@@ -102,6 +105,7 @@ codex-win gh pr-verify --pr ... --title ... --body-file ... --base ... --head ..
 codex-win shell lint --shell powershell5 --command "..."
 codex-win cleanup generated --profile markdown-exports --target <repo> [--apply]
 codex-win test plan --base origin/main --head HEAD --changed-files changed.txt
+codex-win review-pack --pr <number-or-url> --base <branch> --output .tmp/review-pack.md
 codex-win agents lint AGENTS.md
 codex-win evals list
 codex-win evals report --output reports/local.json
@@ -146,6 +150,32 @@ codex-win test plan --base origin/main --head HEAD --changed-files .tmp/changed-
 ```
 
 策略是：同一 head SHA 的 current-head full pytest 最多记录一次；只有 current-head full pytest 失败、且需要判断基线是否已坏时，才允许 base full pytest。可用 `--record-current-full passed|failed` 或 `--record-base-full passed|failed` 写入轻量状态文件，默认位置是 `.tmp/codex-test-plan-state.json`，落在通常已忽略的临时目录中。
+
+## PR Review Package
+
+`codex-win review-pack` 生成 Codex PR Review Package 的机械事实层，包括 HEAD snapshot、changed files、scope profile 分类、PR body 协议检查、命令日志摘要和人工 findings 占位。它不做 merge 决策，不推断业务语义，也不判断评分、rubric 或 evidence 正确性。
+
+基本用法：
+
+```powershell
+codex-win review-pack --pr 388 --base GPT --scope-profile governance --output .tmp/review-pack.md
+```
+
+项目可在 `.codex/review-pack.json` 中定义 scope profile：
+
+```json
+{
+  "scope_profiles": {
+    "data-jsonl": {
+      "allow": ["data/**", "tests/**"],
+      "suspicious": ["AGENTS.md", "docs/**", "scripts/**", "exports/**"],
+      "forbid": ["data/configs/**", "project_config.yml"]
+    }
+  }
+}
+```
+
+如果有人工记录的命令日志，可通过 `--command-log commands.json` 放入 `## Commands Run`；未提供时只输出当前进程事实，并把验证结论留给 reviewer。
 
 ## hooks
 
