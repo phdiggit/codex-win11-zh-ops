@@ -32,6 +32,15 @@ codex-win body validate .tmp/bodies/body.md
 # 检查 Windows PowerShell 5.1 命令是否含不兼容语法
 codex-win shell lint --shell powershell5 --command "git status && git diff"
 
+# 用 UTF-8 环境运行 Python / pytest / validator / export / build 命令
+codex-win run -- python -m compileall src
+
+# 规划 focused tests 与 full pytest 预算
+codex-win test plan --base origin/main --head HEAD --format text
+
+# dry-run 检查生成物清理范围
+codex-win cleanup generated --profile markdown-exports --target .
+
 # 检查 AGENTS.md 是否包含核心约束
 codex-win agents lint AGENTS.md
 ```
@@ -78,6 +87,7 @@ codex-win install-template --profile strict --target .
 
 ```text
 codex-win preflight
+codex-win run -- <command...>
 codex-win encoding check <path>
 codex-win encoding write-json <path> --input <json-file>
 codex-win body normalize --input <in.md> --output <out.md>
@@ -90,10 +100,52 @@ codex-win gh pr-create --title ... --body-file ... --base ... --head ...
 codex-win gh pr-edit --pr ... --title ... --body-file ... --base ... --head ...
 codex-win gh pr-verify --pr ... --title ... --body-file ... --base ... --head ...
 codex-win shell lint --shell powershell5 --command "..."
+codex-win cleanup generated --profile markdown-exports --target <repo> [--apply]
+codex-win test plan --base origin/main --head HEAD --changed-files changed.txt
 codex-win agents lint AGENTS.md
 codex-win evals list
 codex-win evals report --output reports/local.json
 ```
+
+## 运行包装器
+
+`codex-win run -- <command...>` 只做一件事：在子进程环境中设置 `PYTHONUTF8=1` 和 `PYTHONIOENCODING=utf-8`，然后原样运行命令并返回原始退出码。它不假设项目结构，也不替代 shell lint；适合 Windows 上的 Python、pytest、validator、export、build 等容易受到 cp936/GBK 影响的命令。
+
+## 生成物清理
+
+`codex-win cleanup generated` 默认 dry-run，只有加 `--apply` 才删除。内置 `markdown-exports` profile 覆盖常见的 `exports/markdown_views/**`，项目可通过 JSON 配置扩展或覆盖：
+
+```json
+{
+  "profiles": {
+    "project-generated": {
+      "extends": "markdown-exports",
+      "patterns": ["reports/generated/**"],
+      "exclude": ["reports/generated/keep.md"]
+    }
+  }
+}
+```
+
+使用方式：
+
+```powershell
+codex-win cleanup generated --profile project-generated --config cleanup.json --target .
+codex-win cleanup generated --profile project-generated --config cleanup.json --target . --apply
+```
+
+清理只会命中显式 profile 配置的相对路径，路径包含绝对路径或 `..` 会被拒绝。
+
+## 测试预算
+
+`codex-win test plan` 根据 changed files 判断是否需要 full pytest，并尽量推荐 focused tests。默认输出人类摘要和 JSON；脚本场景可用 `--format json`。
+
+```powershell
+git -c core.quotepath=false diff --name-only origin/main...HEAD > .tmp/changed-files.txt
+codex-win test plan --base origin/main --head HEAD --changed-files .tmp/changed-files.txt --format both
+```
+
+策略是：同一 head SHA 的 current-head full pytest 最多记录一次；只有 current-head full pytest 失败、且需要判断基线是否已坏时，才允许 base full pytest。可用 `--record-current-full passed|failed` 或 `--record-base-full passed|failed` 写入轻量状态文件，默认位置是 `.codex/test-plan-state.json`。
 
 ## hooks
 
