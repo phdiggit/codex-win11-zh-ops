@@ -8,7 +8,7 @@ from typing import Any
 from .git import run_git
 
 
-DEFAULT_STATE_FILE = ".codex/test-plan-state.json"
+DEFAULT_STATE_FILE = ".tmp/codex-test-plan-state.json"
 FULL_STATUS_VALUES = {"passed", "failed"}
 
 

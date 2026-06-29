@@ -72,7 +72,7 @@
 
 ## 验证选择
 
-验证遵循先便宜后昂贵、先定向后全量、先静态后运行。需要 pytest 或同类全量验证前，先用 `codex-win test plan --base <base> --head HEAD` 判断 focused tests、full pytest 是否必要，以及当前 head SHA 是否已经跑过 full pytest。
+验证遵循先便宜后昂贵、先定向后全量、先静态后运行。需要 pytest 或同类全量验证前，先用 `codex-win test plan --base <base> --head HEAD` 判断 focused tests、full pytest 是否必要，以及当前 head SHA 是否已经跑过 full pytest；测试预算状态默认写入 `.tmp/codex-test-plan-state.json`。
 
 | 改动类型 | 优先验证 |
 |---|---|
@@ -84,7 +84,7 @@
 
 失败时记录精确命令和关键错误；不通过无限重跑掩盖不稳定测试；无代码变化时不重复运行同一个重型失败命令。只有当前 head 的 full pytest 失败、且需要判断是否为基线问题时，才运行 base full pytest。
 
-生成物清理遵循“先记录验证结果，再清理一次”：使用 `codex-win cleanup generated --profile markdown-exports --target <repo>` 先 dry-run，确认只命中显式配置的生成路径后才加 `--apply`；不要在同一轮验证中反复生成、清理、再生成。
+生成物清理遵循“先记录验证结果，再清理一次”：使用 `codex-win cleanup generated --profile markdown-exports --target <repo>` 先 dry-run，确认只命中显式配置的生成路径后才加 `--apply`；默认保留 `**/.gitkeep`；不要在同一轮验证中反复生成、清理、再生成。
 
 ## 回报结果
 

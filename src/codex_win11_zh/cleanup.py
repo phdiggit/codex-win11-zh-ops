@@ -33,6 +33,7 @@ BUILTIN_GENERATED_PROFILES = {
     "markdown-exports": CleanupProfile(
         name="markdown-exports",
         patterns=("exports/markdown_views/**",),
+        exclude=("**/.gitkeep",),
     ),
 }
 

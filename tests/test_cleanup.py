@@ -36,18 +36,22 @@ class CleanupTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             target = Path(td)
             generated = target / "exports" / "markdown_views" / "page.md"
+            gitkeep = target / "exports" / "markdown_views" / ".gitkeep"
             outside = target / "exports" / "other" / "keep.md"
             generated.parent.mkdir(parents=True)
             outside.parent.mkdir(parents=True)
             generated.write_text("generated\n", encoding="utf-8")
+            gitkeep.write_text("", encoding="utf-8")
             outside.write_text("user work\n", encoding="utf-8")
 
             plan = plan_generated_cleanup(target, profile_name="markdown-exports")
             result = apply_generated_cleanup(plan)
 
             self.assertFalse(generated.exists())
+            self.assertTrue(gitkeep.exists())
             self.assertTrue(outside.exists())
             self.assertIn("exports/markdown_views/page.md", result["deleted"])
+            self.assertNotIn("exports/markdown_views/.gitkeep", result["deleted"])
 
     def test_generated_cleanup_config_can_extend_builtin_profile(self) -> None:
         with tempfile.TemporaryDirectory() as td:

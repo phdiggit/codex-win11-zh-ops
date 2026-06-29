@@ -4,13 +4,16 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from codex_win11_zh.test_plan import build_test_plan, classify_changed_files, read_changed_files
+from codex_win11_zh.test_plan import DEFAULT_STATE_FILE, build_test_plan, classify_changed_files, read_changed_files
 
 
 ROOT = Path(__file__).resolve().parents[1]
 
 
 class TestPlanTests(unittest.TestCase):
+    def test_default_state_file_uses_tmp(self) -> None:
+        self.assertEqual(".tmp/codex-test-plan-state.json", DEFAULT_STATE_FILE)
+
     def test_source_change_requires_full_and_recommends_focused_test(self) -> None:
         data = classify_changed_files(["src/codex_win11_zh/runtime.py"], cwd=ROOT)
 

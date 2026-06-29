@@ -113,7 +113,7 @@ codex-win evals report --output reports/local.json
 
 ## 生成物清理
 
-`codex-win cleanup generated` 默认 dry-run，只有加 `--apply` 才删除。内置 `markdown-exports` profile 覆盖常见的 `exports/markdown_views/**`，项目可通过 JSON 配置扩展或覆盖：
+`codex-win cleanup generated` 默认 dry-run，只有加 `--apply` 才删除。内置 `markdown-exports` profile 覆盖常见的 `exports/markdown_views/**`，并默认排除 `**/.gitkeep`，避免删除保留空目录的占位文件。项目可通过 JSON 配置扩展或覆盖：
 
 ```json
 {
@@ -145,7 +145,7 @@ git -c core.quotepath=false diff --name-only origin/main...HEAD > .tmp/changed-f
 codex-win test plan --base origin/main --head HEAD --changed-files .tmp/changed-files.txt --format both
 ```
 
-策略是：同一 head SHA 的 current-head full pytest 最多记录一次；只有 current-head full pytest 失败、且需要判断基线是否已坏时，才允许 base full pytest。可用 `--record-current-full passed|failed` 或 `--record-base-full passed|failed` 写入轻量状态文件，默认位置是 `.codex/test-plan-state.json`。
+策略是：同一 head SHA 的 current-head full pytest 最多记录一次；只有 current-head full pytest 失败、且需要判断基线是否已坏时，才允许 base full pytest。可用 `--record-current-full passed|failed` 或 `--record-base-full passed|failed` 写入轻量状态文件，默认位置是 `.tmp/codex-test-plan-state.json`，落在通常已忽略的临时目录中。
 
 ## hooks
 
