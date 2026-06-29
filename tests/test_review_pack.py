@@ -4,18 +4,47 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from codex_win11_zh.review_pack import (
     PACKAGE_SECTIONS,
     ReviewSnapshot,
+    apply_review_pack_to_pr,
     build_review_pack_data,
     check_pr_body_protocol,
     classify_scope,
+    format_missing_scope_profile,
     load_command_summary,
     load_review_pack_config,
     render_review_pack,
+    splice_review_pack_into_body,
+    summarize_validation_metadata,
     write_review_pack,
 )
+
+
+GOOD_PR_BODY = """# Summary
+
+Update review package.
+
+# Scope
+
+- README.md
+
+# Validation
+
+Done.
+
+# Risk
+
+No dangerous actions.
+
+# Unresolved
+
+None.
+
+Refs #1
+"""
 
 
 class ReviewPackTests(unittest.TestCase):
@@ -47,6 +76,15 @@ class ReviewPackTests(unittest.TestCase):
         self.assertEqual("clean", result["scope_verdict"])
         self.assertEqual(["README.md"], result["in_scope"])
         self.assertIn("no scope profile", result["note"])
+
+    def test_missing_scope_profile_diagnostic_lists_available_profiles(self) -> None:
+        config = {"scope_profiles": {"docs": {"allow": ["docs/**"]}, "tests": {"allow": ["tests/**"]}}}
+
+        message = format_missing_scope_profile("governance", config)
+
+        self.assertIn("governance", message)
+        self.assertIn("docs, tests", message)
+        self.assertIn("omit --scope-profile", message)
 
     def test_protocol_checks_head_sha_and_changed_files(self) -> None:
         body = """# 摘要
@@ -88,12 +126,31 @@ head_sha: abcdef123456
     def test_command_log_json_is_embedded_as_fact_source(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             path = Path(td) / "commands.json"
-            path.write_text(json.dumps({"commands": [{"cmd": "python -m unittest", "exit_code": 0}]}), encoding="utf-8")
+            path.write_text(
+                json.dumps(
+                    {
+                        "commands": [{"command": "python -m unittest", "result": "passed", "kind": "current_focused"}],
+                        "validation": {
+                            "current_snapshot": [{"command": "python -m unittest", "result": "passed", "summary": "41 passed"}],
+                            "base_snapshot": [{"command": "python -m unittest", "result": "failed", "summary": "old failure"}],
+                            "historical": [],
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
 
             summary = load_command_summary(path)
 
             self.assertEqual(str(path), summary["source"])
-            self.assertEqual(0, summary["data"]["commands"][0]["exit_code"])
+            self.assertEqual("passed", summary["validation_summary"]["validation_summary"])
+            self.assertEqual("listed", summary["validation_summary"]["fixed_baseline_failures"])
+
+    def test_validation_metadata_without_current_snapshot_stays_unknown_for_fixed_baseline(self) -> None:
+        summary = summarize_validation_metadata({"validation": {"historical": [{"command": "old", "result": "failed"}]}})
+
+        self.assertEqual("unknown", summary["validation_summary"])
+        self.assertEqual("unknown", summary["fixed_baseline_failures"])
 
     def test_load_config_reads_scope_profiles(self) -> None:
         with tempfile.TemporaryDirectory() as td:
@@ -131,7 +188,59 @@ head_sha: abcdef123456
 
         for section in PACKAGE_SECTIONS:
             self.assertIn(section, markdown)
+        self.assertIn("- head_status: `current`", markdown)
+        self.assertIn("- validation_summary: `unknown`", markdown)
         self.assertIn("merge_judgment: `not_provided_by_tool`", markdown)
+
+    def test_splice_review_pack_replaces_existing_package_section(self) -> None:
+        body = "# 摘要\n\nKeep me.\n\n# Codex PR Review Package\n\nold\n\n# 尾部\n\nKeep tail.\n"
+        package = "# Codex PR Review Package\n\n## Reviewer Quick Summary\n\n- head_status: `current`\n"
+
+        merged = splice_review_pack_into_body(body, package)
+
+        self.assertIn("Keep me.", merged)
+        self.assertIn("- head_status: `current`", merged)
+        self.assertIn("Keep tail.", merged)
+        self.assertNotIn("\nold\n", merged)
+
+    def test_splice_review_pack_replaces_legacy_v11_section_without_duplicate(self) -> None:
+        body = "# Summary\n\nKeep me.\n\n## Codex PR Review Package v1.1\n\nold package\n\n## Tail\n\nKeep tail.\n"
+        package = "# Codex PR Review Package\n\n## Reviewer Quick Summary\n\n- head_status: `current`\n"
+
+        merged = splice_review_pack_into_body(body, package)
+
+        self.assertIn("Keep me.", merged)
+        self.assertIn("Keep tail.", merged)
+        self.assertIn("# Codex PR Review Package", merged)
+        self.assertNotIn("Codex PR Review Package v1.1", merged)
+        self.assertNotIn("old package", merged)
+        self.assertEqual(1, merged.count("Codex PR Review Package"))
+
+    def test_apply_review_pack_writes_merged_body_and_verifies_marker(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            package_file = Path(td) / "review-pack.md"
+            body_file = Path(td) / "body.md"
+            package_file.write_text("# Codex PR Review Package\n\n## Reviewer Quick Summary\n\n- head_status: `current`\n\nhead123\n", encoding="utf-8")
+            view = {
+                "number": 1,
+                "url": "https://example/pr/1",
+                "body": GOOD_PR_BODY,
+                "headRefOid": "head123",
+            }
+
+            def fake_apply(*, pr: str, body_file: str | Path, cwd=None, require_sections: bool = True):
+                text = Path(body_file).read_text(encoding="utf-8")
+                self.assertIn("# Codex PR Review Package", text)
+                self.assertIn("head123", text)
+                return {**view, "body": text}
+
+            with patch("codex_win11_zh.review_pack.pr_view", return_value=view), patch(
+                "codex_win11_zh.review_pack.pr_body_apply", side_effect=fake_apply
+            ):
+                result = apply_review_pack_to_pr(pr="1", package_file=package_file, body_file=body_file)
+
+            self.assertEqual("head123", result["head_sha"])
+            self.assertTrue(body_file.exists())
 
     def test_write_review_pack_creates_parent_directory(self) -> None:
         with tempfile.TemporaryDirectory() as td:

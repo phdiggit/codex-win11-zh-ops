@@ -114,6 +114,20 @@ def pr_edit(*, pr: str, title: str, body_file: str | Path, base: str | None = No
     return view
 
 
+def pr_body_apply(*, pr: str, body_file: str | Path, cwd: str | Path | None = None, require_sections: bool = True) -> dict[str, Any]:
+    issues = validate_file(body_file, require_sections=require_sections)
+    if issues:
+        details = "\n".join(f"{i.code}: {i.message}" for i in issues)
+        raise ValueError(f"body validate failed:\n{details}")
+
+    result = run_gh(["pr", "edit", pr, "--body-file", str(body_file)], cwd=cwd)
+    if result.returncode != 0:
+        raise RuntimeError(result.stderr.strip() or result.stdout.strip())
+    view = pr_view(pr, cwd=cwd)
+    verify_pr_view(view, body_file=body_file)
+    return view
+
+
 def verify_pr_view(view: dict[str, Any], *, title: str | None = None, body_file: str | Path | None = None, base: str | None = None, head: str | None = None, draft: bool | None = None) -> None:
     failures: list[str] = []
     if title is not None and view.get("title") != title:

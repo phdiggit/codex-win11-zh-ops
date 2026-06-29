@@ -9,13 +9,22 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from .gh import run_gh
+from .encoding import read_text_auto, write_utf8_no_bom
+from .gh import pr_body_apply, pr_view, run_gh
 from .git import run_git
+from .pr_body import normalize_text
 
 
 DEFAULT_CONFIG = ".codex/review-pack.json"
+DEFAULT_APPLY_BODY_FILE = ".tmp/review-pack-pr-body.md"
+REVIEW_PACK_SECTION_TITLE = "Codex PR Review Package"
+REVIEW_PACK_BODY_SECTION_ALIASES = (
+    REVIEW_PACK_SECTION_TITLE,
+    "Codex PR Review Package v1.1",
+)
 PACKAGE_SECTIONS = [
     "# Codex PR Review Package",
+    "## Reviewer Quick Summary",
     "## HEAD SNAPSHOT LOCK",
     "## Scope / Ownership",
     "## Commands Run",
@@ -91,7 +100,7 @@ def classify_scope(changed_files: list[str], *, config: dict[str, Any], profile_
 
     profiles = config.get("scope_profiles", {})
     if not isinstance(profiles, dict) or profile_name not in profiles:
-        raise ValueError(f"unknown review-pack scope profile: {profile_name}")
+        raise ValueError(format_missing_scope_profile(profile_name, config))
     profile = profiles[profile_name]
     if not isinstance(profile, dict):
         raise ValueError(f"review-pack scope profile must be an object: {profile_name}")
@@ -136,6 +145,28 @@ def _string_list(value: Any, label: str) -> list[str]:
     if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
         raise ValueError(f"review-pack profile field '{label}' must be a string or string list")
     return [_normalize_path(item) for item in value]
+
+
+def available_scope_profiles(config: dict[str, Any]) -> list[str]:
+    profiles = config.get("scope_profiles", {})
+    if not isinstance(profiles, dict):
+        return []
+    return sorted(str(name) for name in profiles)
+
+
+def format_missing_scope_profile(profile_name: str, config: dict[str, Any]) -> str:
+    available = available_scope_profiles(config)
+    if available:
+        available_text = ", ".join(available)
+        suggestion = f"rerun with one of: {available_text}; or omit --scope-profile for fact-only classification"
+    else:
+        available_text = "none"
+        suggestion = "rerun without --scope-profile, or add scope_profiles to .codex/review-pack.json"
+    return (
+        f"unknown review-pack scope profile: {profile_name}\n"
+        f"available profiles: {available_text}\n"
+        f"suggestion: {suggestion}"
+    )
 
 
 def check_pr_body_protocol(body: str, *, head_sha: str, changed_files: list[str]) -> dict[str, Any]:
@@ -215,9 +246,82 @@ def load_command_summary(path: str | Path | None) -> dict[str, Any]:
             "python": sys.version.split()[0],
             "argv_supported": False,
             "note": "no command log supplied; review-pack did not infer validation success",
+            "validation_summary": summarize_validation_metadata({}),
         }
     data = json.loads(Path(path).read_text(encoding="utf-8"))
-    return {"source": str(path), "data": data}
+    return {"source": str(path), "data": data, "validation_summary": summarize_validation_metadata(data)}
+
+
+def summarize_validation_metadata(data: dict[str, Any]) -> dict[str, Any]:
+    validation = data.get("validation", {}) if isinstance(data, dict) else {}
+    if not isinstance(validation, dict):
+        validation = {}
+
+    current = _validation_entries(validation.get("current_snapshot", []))
+    base = _validation_entries(validation.get("base_snapshot", []))
+    historical = _validation_entries(validation.get("historical", []))
+    command_entries = _validation_entries(data.get("commands", [])) if isinstance(data, dict) else []
+    if not current:
+        current = [entry for entry in command_entries if str(entry.get("kind", "")).startswith("current")]
+
+    current_results = _results(current)
+    if not current and not command_entries:
+        validation_summary = "unknown"
+    elif current_results and all(result == "passed" for result in current_results):
+        validation_summary = "passed"
+    elif "failed" in current_results:
+        validation_summary = "failed"
+    else:
+        validation_summary = "partial"
+
+    current_failed = [entry for entry in current if _entry_result(entry) == "failed"]
+    base_failed = [entry for entry in base if _entry_result(entry) == "failed"]
+    historical_failed = [entry for entry in historical if _entry_result(entry) == "failed"]
+
+    if current:
+        pr_induced = "listed" if current_failed else "none"
+    else:
+        pr_induced = "unknown"
+
+    if (base_failed or historical_failed) and current_results and "failed" not in current_results:
+        fixed_baseline = "listed"
+    elif (base or historical) and current_results:
+        fixed_baseline = "none"
+    else:
+        fixed_baseline = "unknown"
+
+    return {
+        "validation_summary": validation_summary,
+        "pr_induced_failures": pr_induced,
+        "pr_induced_failure_items": [_entry_label(entry) for entry in current_failed],
+        "fixed_baseline_failures": fixed_baseline,
+        "fixed_baseline_failure_items": [_entry_label(entry) for entry in [*base_failed, *historical_failed]],
+        "current_snapshot": current,
+        "base_snapshot": base,
+        "historical": historical,
+    }
+
+
+def _validation_entries(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    return [entry for entry in value if isinstance(entry, dict)]
+
+
+def _entry_result(entry: dict[str, Any]) -> str:
+    return str(entry.get("result") or entry.get("status") or "unknown").lower()
+
+
+def _results(entries: list[dict[str, Any]]) -> list[str]:
+    return [_entry_result(entry) for entry in entries if _entry_result(entry) != "unknown"]
+
+
+def _entry_label(entry: dict[str, Any]) -> str:
+    command = entry.get("command") or entry.get("cmd") or entry.get("name") or "unnamed check"
+    summary = entry.get("summary")
+    if summary:
+        return f"{command}: {summary}"
+    return str(command)
 
 
 def build_review_pack_data(
@@ -244,6 +348,20 @@ def build_review_pack_data(
         "scope": scope,
         "commands": commands,
         "protocol": protocol,
+        "quick_summary": build_quick_summary(scope=scope, protocol=protocol, commands=commands),
+    }
+
+
+def build_quick_summary(*, scope: dict[str, Any], protocol: dict[str, Any], commands: dict[str, Any]) -> dict[str, str]:
+    head_status_map = {"pass": "current", "fail": "stale", "unknown": "unknown"}
+    validation = commands.get("validation_summary", {}) if isinstance(commands, dict) else {}
+    return {
+        "head_status": head_status_map.get(protocol["head_sha_matches_current_head"]["status"], "unknown"),
+        "scope_verdict": str(scope["scope_verdict"]),
+        "validation_summary": str(validation.get("validation_summary", "unknown")),
+        "pr_induced_failures": str(validation.get("pr_induced_failures", "unknown")),
+        "fixed_baseline_failures": str(validation.get("fixed_baseline_failures", "unknown")),
+        "merge_judgment": "not_provided_by_tool",
     }
 
 
@@ -252,9 +370,19 @@ def render_review_pack(data: dict[str, Any]) -> str:
     scope = data["scope"]
     commands = data["commands"]
     protocol = data["protocol"]
+    quick_summary = data["quick_summary"]
 
     lines: list[str] = [
         "# Codex PR Review Package",
+        "",
+        "## Reviewer Quick Summary",
+        "",
+        f"- head_status: `{quick_summary['head_status']}`",
+        f"- scope_verdict: `{quick_summary['scope_verdict']}`",
+        f"- validation_summary: `{quick_summary['validation_summary']}`",
+        f"- pr_induced_failures: `{quick_summary['pr_induced_failures']}`",
+        f"- fixed_baseline_failures: `{quick_summary['fixed_baseline_failures']}`",
+        f"- merge_judgment: `{quick_summary['merge_judgment']}`",
         "",
         "## HEAD SNAPSHOT LOCK",
         "",
@@ -291,6 +419,8 @@ def render_review_pack(data: dict[str, Any]) -> str:
             *_bullet_list(scope["forbidden_hits"]),
             "",
             "## Commands Run",
+            "",
+            *_validation_summary_lines(commands),
             "",
             "```json",
             json.dumps(commands, ensure_ascii=False, indent=2),
@@ -345,6 +475,35 @@ def _protocol_lines(protocol: dict[str, Any]) -> list[str]:
     return lines
 
 
+def _validation_summary_lines(commands: dict[str, Any]) -> list[str]:
+    validation = commands.get("validation_summary", {}) if isinstance(commands, dict) else {}
+    if not validation:
+        return ["- validation_summary: `unknown`"]
+    lines = [
+        f"- validation_summary: `{validation.get('validation_summary', 'unknown')}`",
+        f"- pr_induced_failures: `{validation.get('pr_induced_failures', 'unknown')}`",
+        f"- fixed_baseline_failures: `{validation.get('fixed_baseline_failures', 'unknown')}`",
+        "",
+        "current_snapshot:",
+        *_entry_bullets(validation.get("current_snapshot", [])),
+        "",
+        "base_snapshot:",
+        *_entry_bullets(validation.get("base_snapshot", [])),
+        "",
+        "historical:",
+        *_entry_bullets(validation.get("historical", [])),
+    ]
+    return lines
+
+
+def _entry_bullets(entries: Any) -> list[str]:
+    if not entries:
+        return ["- none"]
+    if not isinstance(entries, list):
+        return ["- unknown"]
+    return [f"- `{_entry_result(entry)}` {_entry_label(entry)}" for entry in entries if isinstance(entry, dict)] or ["- none"]
+
+
 def collect_review_pack(
     *,
     pr: str,
@@ -380,8 +539,96 @@ def collect_review_pack(
 
 def write_review_pack(path: str | Path, markdown: str) -> None:
     output = Path(path)
-    output.parent.mkdir(parents=True, exist_ok=True)
-    output.write_text(markdown, encoding="utf-8")
+    write_utf8_no_bom(output, normalize_text(markdown))
+
+
+def splice_review_pack_into_body(body: str, package_text: str, *, section: str = REVIEW_PACK_SECTION_TITLE) -> str:
+    normalized_body = normalize_text(body) if body.strip() else ""
+    normalized_package = normalize_text(package_text)
+    if _heading_bounds(normalized_package, section) is None:
+        raise ValueError(f"review package does not contain section marker: {section}")
+
+    bounds = _body_heading_bounds(normalized_body, section)
+    if bounds is None:
+        if normalized_body:
+            return normalize_text(normalized_body.rstrip("\n") + "\n\n" + normalized_package)
+        return normalized_package
+
+    lines = normalized_body.splitlines()
+    start, end = bounds
+    package_lines = normalized_package.rstrip("\n").splitlines()
+    merged = "\n".join([*lines[:start], *package_lines, *lines[end:]])
+    return normalize_text(merged)
+
+
+def _body_heading_bounds(text: str, section: str) -> tuple[int, int] | None:
+    sections = [section]
+    if section == REVIEW_PACK_SECTION_TITLE:
+        sections.extend(alias for alias in REVIEW_PACK_BODY_SECTION_ALIASES if alias != section)
+    for candidate in sections:
+        bounds = _heading_bounds(text, candidate)
+        if bounds is not None:
+            return bounds
+    return None
+
+
+def _heading_bounds(text: str, section: str) -> tuple[int, int] | None:
+    if not text.strip():
+        return None
+    lines = text.splitlines()
+    heading_re = re.compile(rf"^(#{{1,6}})\s+{re.escape(section)}\s*$")
+    for index, line in enumerate(lines):
+        match = heading_re.match(line.strip())
+        if not match:
+            continue
+        level = len(match.group(1))
+        end = len(lines)
+        for next_index in range(index + 1, len(lines)):
+            next_match = re.match(r"^(#{1,6})\s+", lines[next_index].strip())
+            if next_match and len(next_match.group(1)) <= level:
+                end = next_index
+                break
+        return index, end
+    return None
+
+
+def prepare_review_pack_body(
+    *,
+    pr: str,
+    package_file: str | Path,
+    body_file: str | Path | None = None,
+    section: str = REVIEW_PACK_SECTION_TITLE,
+    cwd: str | Path | None = None,
+) -> dict[str, Any]:
+    view = pr_view(pr, cwd=cwd)
+    package_text = read_text_auto(package_file).text
+    head_sha = str(view.get("headRefOid") or "")
+    if head_sha and head_sha not in package_text:
+        raise ValueError(f"review package does not contain current head SHA: {head_sha}")
+    merged = splice_review_pack_into_body(str(view.get("body") or ""), package_text, section=section)
+    output = Path(body_file) if body_file is not None else Path(DEFAULT_APPLY_BODY_FILE)
+    write_utf8_no_bom(output, merged)
+    return {"body_file": str(output), "head_sha": head_sha, "view": view}
+
+
+def apply_review_pack_to_pr(
+    *,
+    pr: str,
+    package_file: str | Path,
+    body_file: str | Path | None = None,
+    section: str = REVIEW_PACK_SECTION_TITLE,
+    cwd: str | Path | None = None,
+    require_sections: bool = True,
+) -> dict[str, Any]:
+    prepared = prepare_review_pack_body(pr=pr, package_file=package_file, body_file=body_file, section=section, cwd=cwd)
+    view = pr_body_apply(pr=pr, body_file=prepared["body_file"], cwd=cwd, require_sections=require_sections)
+    remote_body = str(view.get("body") or "")
+    if _heading_bounds(remote_body, section) is None:
+        raise ValueError(f"remote PR body does not contain review package marker: {section}")
+    head_sha = prepared["head_sha"]
+    if head_sha and head_sha not in remote_body:
+        raise ValueError(f"remote PR body does not contain current head SHA: {head_sha}")
+    return {"body_file": prepared["body_file"], "head_sha": head_sha, "view": view}
 
 
 def _fetch_pr_view(pr: str, *, cwd: str | Path | None = None) -> dict[str, Any]:

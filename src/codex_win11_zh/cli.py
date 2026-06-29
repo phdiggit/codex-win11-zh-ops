@@ -13,10 +13,10 @@ from .agents_lint import lint_agents_file
 from .cleanup import apply_generated_cleanup, cleanup_plan_to_dict, plan_generated_cleanup
 from .encoding import read_text_auto, roundtrip_check, write_json_utf8
 from .evals import build_report, load_scenarios
-from .gh import preflight as gh_preflight, pr_create, pr_edit, pr_view, verify_pr_view
+from .gh import preflight as gh_preflight, pr_body_apply, pr_create, pr_edit, pr_view, verify_pr_view
 from .pr_body import normalize_file, validate_file
 from .review_pack import DEFAULT_CONFIG as REVIEW_PACK_DEFAULT_CONFIG
-from .review_pack import collect_review_pack, render_review_pack, write_review_pack
+from .review_pack import REVIEW_PACK_SECTION_TITLE, apply_review_pack_to_pr, collect_review_pack, render_review_pack, write_review_pack
 from .runtime import run_command
 from .shell import format_issues, lint_command
 from .stdio import configure_utf8_stdio
@@ -82,6 +82,24 @@ def cmd_pr_body_validate(args: argparse.Namespace) -> int:
         return 1
     label = getattr(args, "body_label", "PR body")
     print(f"{label} validation passed")
+    return 0
+
+
+def cmd_pr_body_apply(args: argparse.Namespace) -> int:
+    view = pr_body_apply(
+        pr=args.pr,
+        body_file=args.body_file,
+        cwd=args.cwd,
+        require_sections=not args.no_required_sections,
+    )
+    print_json(
+        {
+            "pr": view.get("number"),
+            "url": view.get("url"),
+            "headRefOid": view.get("headRefOid"),
+            "body_verified": True,
+        }
+    )
     return 0
 
 
@@ -199,6 +217,30 @@ def cmd_test_plan(args: argparse.Namespace) -> int:
 
 
 def cmd_review_pack(args: argparse.Namespace) -> int:
+    action = args.review_pack_action or "generate"
+    if action in {"apply", "update-pr-body"}:
+        if not args.pr or not args.package_file:
+            raise ValueError("review-pack apply requires --pr and --package-file")
+        result = apply_review_pack_to_pr(
+            pr=args.pr,
+            package_file=args.package_file,
+            body_file=args.body_file,
+            section=args.section,
+            cwd=args.cwd,
+            require_sections=not args.no_required_sections,
+        )
+        print_json(
+            {
+                "body_file": result["body_file"],
+                "head_sha": result["head_sha"],
+                "url": result["view"].get("url"),
+                "package_marker_verified": True,
+            }
+        )
+        return 0
+
+    if not args.pr or not args.base or not args.output:
+        raise ValueError("review-pack generation requires --pr, --base, and --output")
     data = collect_review_pack(
         pr=args.pr,
         base=args.base,
@@ -320,6 +362,12 @@ def build_parser() -> argparse.ArgumentParser:
         p.add_argument("path")
         p.add_argument("--no-required-sections", action="store_true")
         p.set_defaults(func=cmd_pr_body_validate, body_label=body_label)
+        p = body_sub.add_parser("apply")
+        p.add_argument("--pr", required=True)
+        p.add_argument("--body-file", required=True)
+        p.add_argument("--cwd", default=None)
+        p.add_argument("--no-required-sections", action="store_true")
+        p.set_defaults(func=cmd_pr_body_apply, body_label=body_label)
 
     add_body_parser("body", help_text="通用 Markdown 正文正规化和校验", body_label="body")
     add_body_parser("pr-body", help_text="PR body 正规化和校验", body_label="PR body")
@@ -397,13 +445,18 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--format", choices=["both", "json", "text"], default="both")
     p.set_defaults(func=cmd_test_plan)
 
-    p = sub.add_parser("review-pack", help="生成 Codex PR Review Package 事实层")
-    p.add_argument("--pr", required=True)
-    p.add_argument("--base", required=True)
+    p = sub.add_parser("review-pack", help="生成或写回 Codex PR Review Package 事实层")
+    p.add_argument("review_pack_action", nargs="?", choices=["generate", "apply", "update-pr-body"])
+    p.add_argument("--pr", default=None)
+    p.add_argument("--base", default=None)
     p.add_argument("--scope-profile", default=None)
     p.add_argument("--config", default=REVIEW_PACK_DEFAULT_CONFIG)
     p.add_argument("--command-log", default=None)
-    p.add_argument("--output", required=True)
+    p.add_argument("--output", default=None)
+    p.add_argument("--package-file", default=None)
+    p.add_argument("--body-file", default=None)
+    p.add_argument("--section", default=REVIEW_PACK_SECTION_TITLE)
+    p.add_argument("--no-required-sections", action="store_true")
     p.add_argument("--cwd", default=None)
     p.set_defaults(func=cmd_review_pack)
 
