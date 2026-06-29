@@ -44,7 +44,7 @@
 2. 中文 Markdown、JSON、PR body、评论正文不得通过 PowerShell inline、管道或 here-string 传递；先写 UTF-8 文件，再交给目标程序。
 3. 处理中文 Markdown、JSON 或文本编码时，优先运行 `codex-win encoding check <path>`；需要写 JSON 时优先用 `codex-win encoding write-json <path> --input <json-file>`。
 4. Windows PowerShell 5.1 不使用 `&&`、`||` 或 Bash here-doc；连续步骤拆成单条命令，或使用 PowerShell 原生控制流；准备执行复杂命令前，优先运行 `codex-win shell lint --shell powershell5 --command "<command>"` 检查 shell 方言和 inline `gh --body` 风险。
-5. Windows 上运行 Python、pytest、validator、export、build 等子进程时，优先使用 `codex-win run -- <command...>`，让子进程继承 `PYTHONUTF8=1` 和 `PYTHONIOENCODING=utf-8`。
+5. Windows 上运行 Python、pytest、validator、export、build 等子进程时，优先使用 `codex-win run -- <command...>`，让子进程继承 `PYTHONUTF8=1` 和 `PYTHONIOENCODING=utf-8`；需要 PR timing 证据时使用 `codex-win run --log .tmp/codex-commands.jsonl -- <command...>`。
 6. Git 状态和 diff 核对使用 `git -c core.quotepath=false`。
 7. `.ps1` 文件如需要兼容 Windows PowerShell 5.1 中文输出，可使用 UTF-8 BOM。
 8. 自动化目录尽量使用英文、数字、短横线，避免 WinPE、cmd、SMB 和日志编码问题。
@@ -56,13 +56,14 @@
 2. 当前仓库本地存在且 `gh` 已认证时，GitHub 远端读写默认优先使用 `gh`；connector 仅在 `gh` 不可用、未认证、权限不足、功能无法完成，或用户明确要求时使用。
 3. 不要对同一 Issue、PR、评论重复使用多个接口写入。
 4. 中文、多行 Markdown、code fence、反引号正文必须先写 `.tmp/bodies/*.md` UTF-8 文件，先运行 `codex-win body normalize/validate`，再用 `codex-win body apply --pr <pr> --body-file <file>` 或 `gh --body-file`；PR body 也可使用兼容入口 `codex-win pr-body ...`。
-5. 创建、编辑或验证 PR 时，优先使用 `codex-win gh pr-create/pr-edit/pr-verify`；如果直接使用 `gh`，仍必须先通过 `codex-win body validate`，并读回 title、body、base、head、Draft 状态验证中文未损坏。复杂 JSON 检查不要在 PowerShell 中拼 `gh --jq`，优先用 `codex-win gh pr-view`、Python JSON 解析或工具自带 verify。
-6. 需要 PR Review Package 时，可用 `codex-win review-pack --pr <pr> --base <base> --output .tmp/review-pack.md` 生成机械事实层；用 `codex-win review-pack apply --pr <pr> --package-file .tmp/review-pack.md --body-file .tmp/pr-body.md --command-log <commands.json>` 写回并同步验证 metadata；没有 scope profile 时 `scope_verdict: unclassified` 不代表业务范围已通过；它只辅助核对 HEAD snapshot、scope 和协议，不替代 reviewer 的 findings、风险判断或 merge 决策。
-7. 不要优先回退到仓库本地 PR body 脚本；只有 `codex-win` 不可用或项目明确要求时才使用 repo-local body tool，并说明原因。
-8. 阶段性或部分交付 PR 使用 `Refs #<issue>`；只有任务卡明确允许完整关闭时才使用 `Closes/Fixes/Resolves #<issue>`。
-9. 默认基于仓库默认分支创建 `codex/<short-task>` 分支；一个任务卡对应一个分支和一个 PR。
-10. Commit 必须是原子的，不机械拆分无意义 commit。
-11. 提交前用 `git -c core.quotepath=false diff --name-only` 和 `git ls-files --others --exclude-standard` 核对文件；提交后用 `git -c core.quotepath=false diff --name-only origin/<base>...HEAD` 核对 PR 相对基线的 changed files。
+5. PR body timing 必须来自测量记录或明确标为 qualitative；不要凭感觉写 `total_codex_wall_time`，使用 `codex-win run --log ...` 和/或 `codex-win timer start/mark/finish ...`，没有 timer 时写 `precise timing unavailable`。
+6. 创建、编辑或验证 PR 时，优先使用 `codex-win gh pr-create/pr-edit/pr-verify`；如果直接使用 `gh`，仍必须先通过 `codex-win body validate`，并读回 title、body、base、head、Draft 状态验证中文未损坏。复杂 JSON 检查不要在 PowerShell 中拼 `gh --jq`，优先用 `codex-win gh pr-view`、Python JSON 解析或工具自带 verify。
+7. 需要 PR Review Package 时，可用 `codex-win review-pack --pr <pr> --base <base> --output .tmp/review-pack.md` 生成机械事实层；用 `codex-win review-pack apply --pr <pr> --package-file .tmp/review-pack.md --body-file .tmp/pr-body.md --command-log <commands.json>` 写回并同步验证 metadata/timing；没有 scope profile 时 `scope_verdict: unclassified` 不代表业务范围已通过；它只辅助核对 HEAD snapshot、scope、协议和已测量 timing，不替代 reviewer 的 findings、风险判断或 merge 决策。
+8. 不要优先回退到仓库本地 PR body 脚本；只有 `codex-win` 不可用或项目明确要求时才使用 repo-local body tool，并说明原因。
+9. 阶段性或部分交付 PR 使用 `Refs #<issue>`；只有任务卡明确允许完整关闭时才使用 `Closes/Fixes/Resolves #<issue>`。
+10. 默认基于仓库默认分支创建 `codex/<short-task>` 分支；一个任务卡对应一个分支和一个 PR。
+11. Commit 必须是原子的，不机械拆分无意义 commit。
+12. 提交前用 `git -c core.quotepath=false diff --name-only` 和 `git ls-files --others --exclude-standard` 核对文件；提交后用 `git -c core.quotepath=false diff --name-only origin/<base>...HEAD` 核对 PR 相对基线的 changed files。
 
 ## 工作区保护
 

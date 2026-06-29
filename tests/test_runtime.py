@@ -39,6 +39,37 @@ class RuntimeTests(unittest.TestCase):
 
         self.assertEqual(7, rc)
 
+    def test_run_cli_appends_timing_jsonl_and_preserves_exit_code(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            log_path = Path(td) / "codex-commands.jsonl"
+
+            rc = main(["run", "--log", str(log_path), "--summary", "expected failure", "--", sys.executable, "-c", "import sys; sys.exit(7)"])
+
+            self.assertEqual(7, rc)
+            lines = log_path.read_text(encoding="utf-8").splitlines()
+            self.assertEqual(1, len(lines))
+            record = json.loads(lines[0])
+            self.assertEqual(7, record["exit_code"])
+            self.assertEqual("failed", record["result"])
+            self.assertEqual("expected failure", record["summary"])
+            self.assertGreaterEqual(record["duration_sec"], 0)
+            self.assertIn("started_at", record)
+            self.assertIn("finished_at", record)
+            self.assertIn(sys.executable, record["command"])
+
+    def test_run_cli_appends_multiple_jsonl_records(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            log_path = Path(td) / "codex-commands.jsonl"
+
+            first = main(["run", "--log", str(log_path), "--", sys.executable, "-c", "pass"])
+            second = main(["run", "--log", str(log_path), "--", sys.executable, "-c", "pass"])
+
+            self.assertEqual(0, first)
+            self.assertEqual(0, second)
+            records = [json.loads(line) for line in log_path.read_text(encoding="utf-8").splitlines()]
+            self.assertEqual(2, len(records))
+            self.assertEqual(["passed", "passed"], [record["result"] for record in records])
+
 
 if __name__ == "__main__":
     unittest.main()

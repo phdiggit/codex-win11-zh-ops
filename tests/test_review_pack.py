@@ -147,6 +147,31 @@ head_sha: abcdef123456
             self.assertEqual("passed", summary["validation_summary"]["validation_summary"])
             self.assertEqual("listed", summary["validation_summary"]["fixed_baseline_failures"])
 
+    def test_command_log_jsonl_reports_measured_command_timing(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "commands.jsonl"
+            path.write_text(
+                json.dumps(
+                    {
+                        "command": "python -m unittest",
+                        "result": "passed",
+                        "kind": "current_command",
+                        "exit_code": 0,
+                        "duration_sec": 3.25,
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+                newline="\n",
+            )
+
+            summary = load_command_summary(path)
+
+        self.assertEqual("passed", summary["validation_summary"]["validation_summary"])
+        self.assertEqual("measured", summary["timing_summary"]["measured_command_time"]["status"])
+        self.assertEqual(3.25, summary["timing_summary"]["measured_command_time"]["duration_sec"])
+        self.assertEqual("partial", summary["timing_summary"]["timing_confidence"])
+
     def test_validation_metadata_without_current_snapshot_stays_unknown_for_fixed_baseline(self) -> None:
         summary = summarize_validation_metadata({"validation": {"historical": [{"command": "old", "result": "failed"}]}})
 
@@ -192,6 +217,10 @@ head_sha: abcdef123456
         self.assertIn("- head_status_at_generation: `current`", markdown)
         self.assertIn("- head_status_after_apply: `unknown`", markdown)
         self.assertIn("- validation_summary: `unknown`", markdown)
+        self.assertIn("## Timing", markdown)
+        self.assertIn("- measured_task_wall_time: `unavailable`", markdown)
+        self.assertIn("- measured_command_time: `unavailable`", markdown)
+        self.assertIn("- timing_confidence: `unavailable`", markdown)
         self.assertIn("## Required Next Actions", markdown)
         self.assertIn("Review project-specific findings manually.", markdown)
         self.assertIn("merge_judgment: `not_provided_by_tool`", markdown)
@@ -226,6 +255,32 @@ head_sha: abcdef123456
         self.assertIn("- fixed_baseline_failures: `listed`", updated)
         self.assertIn('"validation_summary": "passed"', updated)
         self.assertNotIn('"validation_summary": "unknown"', updated)
+
+    def test_update_review_pack_for_apply_inserts_timing_from_command_log(self) -> None:
+        package = "# Codex PR Review Package\n\n## Reviewer Quick Summary\n\n- head_status_at_generation: `unknown`\n- head_status_after_apply: `unknown`\n- validation_summary: `unknown`\n- pr_induced_failures: `unknown`\n- fixed_baseline_failures: `unknown`\n\n## Commands Run\n\n- validation_summary: `unknown`\n\n```json\n{}\n```\n\n## Protocol Compliance\n\n- unknown\n"
+        with tempfile.TemporaryDirectory() as td:
+            log_path = Path(td) / "commands.jsonl"
+            log_path.write_text(
+                json.dumps(
+                    {
+                        "command": "focused",
+                        "result": "passed",
+                        "kind": "current_command",
+                        "exit_code": 0,
+                        "duration_sec": 4.5,
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+                newline="\n",
+            )
+
+            updated = update_review_pack_for_apply(package, command_log=log_path)
+
+        self.assertIn("## Timing", updated)
+        self.assertIn("- measured_command_time: `4.500 sec`", updated)
+        self.assertIn("- timing_confidence: `partial`", updated)
+        self.assertIn("- validation_summary: `passed`", updated)
 
     def test_update_review_pack_for_apply_syncs_manual_validation_metadata_to_json(self) -> None:
         package = "# Codex PR Review Package\n\n## Reviewer Quick Summary\n\n- head_status_at_generation: `unknown`\n- head_status_after_apply: `unknown`\n- validation_summary: `unknown`\n- pr_induced_failures: `unknown`\n- fixed_baseline_failures: `unknown`\n\n## Commands Run\n\n- validation_summary: `pass`\n- pr_induced_failures: `none_known`\n\n```json\n{\"validation_summary\": {\"validation_summary\": \"unknown\", \"pr_induced_failures\": \"unknown\"}}\n```\n\n## Protocol Compliance\n\n- unknown\n"
