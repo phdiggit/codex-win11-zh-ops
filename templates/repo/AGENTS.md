@@ -56,7 +56,7 @@
 2. 当前仓库本地存在且 `gh` 已认证时，GitHub 远端读写默认优先使用 `gh`；connector 仅在 `gh` 不可用、未认证、权限不足、功能无法完成，或用户明确要求时使用。
 3. 不要对同一 Issue、PR、评论重复使用多个接口写入。
 4. 中文、多行 Markdown、code fence、反引号正文必须先写 `.tmp/bodies/*.md` UTF-8 文件，先运行 `codex-win body normalize/validate`，再用 `codex-win body apply --pr <pr> --body-file <file>` 或 `gh --body-file`；PR body 也可使用兼容入口 `codex-win pr-body ...`。
-5. PR body timing 必须来自测量记录或明确标为 qualitative；不要凭感觉写 `total_codex_wall_time`，使用 `codex-win run --log ...` 和/或 `codex-win timer start/mark/finish ...`，没有 timer 时写 `precise timing unavailable`。
+5. PR body timing 必须来自测量记录或明确标为 qualitative；不要凭感觉写精确分钟数，使用 `codex-win run --log ...` 和/或 `codex-win timer start/mark/finish ...`，没有 timer 时写 `precise timing unavailable`。
 6. 创建、编辑或验证 PR 时，优先使用 `codex-win gh pr-create/pr-edit/pr-verify`；如果直接使用 `gh`，仍必须先通过 `codex-win body validate`，并读回 title、body、base、head、Draft 状态验证中文未损坏。复杂 JSON 检查不要在 PowerShell 中拼 `gh --jq`，优先用 `codex-win gh pr-view`、Python JSON 解析或工具自带 verify。
 7. 需要 PR Review Package 时，可用 `codex-win review-pack --pr <pr> --base <base> --output .tmp/review-pack.md` 生成机械事实层；用 `codex-win review-pack apply --pr <pr> --package-file .tmp/review-pack.md --body-file .tmp/pr-body.md --command-log <commands.json>` 写回并同步验证 metadata/timing；没有 scope profile 时 `scope_verdict: unclassified` 不代表业务范围已通过；它只辅助核对 HEAD snapshot、scope、协议和已测量 timing，不替代 reviewer 的 findings、风险判断或 merge 决策。
 8. 不要优先回退到仓库本地 PR body 脚本；只有 `codex-win` 不可用或项目明确要求时才使用 repo-local body tool，并说明原因。
