@@ -203,6 +203,19 @@ head_sha: abcdef123456
         self.assertIn("Keep tail.", merged)
         self.assertNotIn("\nold\n", merged)
 
+    def test_splice_review_pack_replaces_legacy_v11_section_without_duplicate(self) -> None:
+        body = "# Summary\n\nKeep me.\n\n## Codex PR Review Package v1.1\n\nold package\n\n## Tail\n\nKeep tail.\n"
+        package = "# Codex PR Review Package\n\n## Reviewer Quick Summary\n\n- head_status: `current`\n"
+
+        merged = splice_review_pack_into_body(body, package)
+
+        self.assertIn("Keep me.", merged)
+        self.assertIn("Keep tail.", merged)
+        self.assertIn("# Codex PR Review Package", merged)
+        self.assertNotIn("Codex PR Review Package v1.1", merged)
+        self.assertNotIn("old package", merged)
+        self.assertEqual(1, merged.count("Codex PR Review Package"))
+
     def test_apply_review_pack_writes_merged_body_and_verifies_marker(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             package_file = Path(td) / "review-pack.md"

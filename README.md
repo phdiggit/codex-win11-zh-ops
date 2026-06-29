@@ -212,7 +212,7 @@ codex-win body validate .tmp/pr-body.md
 codex-win body apply --pr 388 --body-file .tmp/pr-body.md
 ```
 
-`review-pack apply` 会替换已有 `# Codex PR Review Package` section，保留 PR body 其它内容，并验证远端正文包含当前 head SHA 和 package marker。
+`review-pack apply` 会替换已有 `# Codex PR Review Package` section；正文侧也兼容旧的 `## Codex PR Review Package v1.1` section，避免追加第二份 review package。写回时会保留 PR body 其它内容，并验证远端正文包含当前 head SHA 和 package marker。
 
 ## hooks
 

@@ -18,6 +18,10 @@ from .pr_body import normalize_text
 DEFAULT_CONFIG = ".codex/review-pack.json"
 DEFAULT_APPLY_BODY_FILE = ".tmp/review-pack-pr-body.md"
 REVIEW_PACK_SECTION_TITLE = "Codex PR Review Package"
+REVIEW_PACK_BODY_SECTION_ALIASES = (
+    REVIEW_PACK_SECTION_TITLE,
+    "Codex PR Review Package v1.1",
+)
 PACKAGE_SECTIONS = [
     "# Codex PR Review Package",
     "## Reviewer Quick Summary",
@@ -544,7 +548,7 @@ def splice_review_pack_into_body(body: str, package_text: str, *, section: str =
     if _heading_bounds(normalized_package, section) is None:
         raise ValueError(f"review package does not contain section marker: {section}")
 
-    bounds = _heading_bounds(normalized_body, section)
+    bounds = _body_heading_bounds(normalized_body, section)
     if bounds is None:
         if normalized_body:
             return normalize_text(normalized_body.rstrip("\n") + "\n\n" + normalized_package)
@@ -555,6 +559,17 @@ def splice_review_pack_into_body(body: str, package_text: str, *, section: str =
     package_lines = normalized_package.rstrip("\n").splitlines()
     merged = "\n".join([*lines[:start], *package_lines, *lines[end:]])
     return normalize_text(merged)
+
+
+def _body_heading_bounds(text: str, section: str) -> tuple[int, int] | None:
+    sections = [section]
+    if section == REVIEW_PACK_SECTION_TITLE:
+        sections.extend(alias for alias in REVIEW_PACK_BODY_SECTION_ALIASES if alias != section)
+    for candidate in sections:
+        bounds = _heading_bounds(text, candidate)
+        if bounds is not None:
+            return bounds
+    return None
 
 
 def _heading_bounds(text: str, section: str) -> tuple[int, int] | None:
