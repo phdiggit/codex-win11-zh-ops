@@ -57,10 +57,11 @@
 3. 不要对同一 Issue、PR、评论重复使用多个接口写入。
 4. 中文、多行 Markdown、code fence、反引号正文必须先写 `.tmp/bodies/*.md` UTF-8 文件，先运行 `codex-win body normalize/validate`，再用 `gh --body-file`；PR body 也可使用兼容入口 `codex-win pr-body ...`。
 5. 创建、编辑或验证 PR 时，优先使用 `codex-win gh pr-create/pr-edit/pr-verify`；如果直接使用 `gh`，仍必须先通过 `codex-win body validate`，并读回 title、body、base、head、Draft 状态验证中文未损坏。
-6. 阶段性或部分交付 PR 使用 `Refs #<issue>`；只有任务卡明确允许完整关闭时才使用 `Closes/Fixes/Resolves #<issue>`。
-7. 默认基于仓库默认分支创建 `codex/<short-task>` 分支；一个任务卡对应一个分支和一个 PR。
-8. Commit 必须是原子的，不机械拆分无意义 commit。
-9. 提交前用 `git -c core.quotepath=false diff --name-only` 和 `git ls-files --others --exclude-standard` 核对文件；提交后用 `git -c core.quotepath=false diff --name-only origin/<base>...HEAD` 核对 PR 相对基线的 changed files。
+6. 需要 PR Review Package 时，可用 `codex-win review-pack --pr <pr> --base <base> --output .tmp/review-pack.md` 生成机械事实层；它只辅助核对 HEAD snapshot、scope 和协议，不替代 reviewer 的 findings、风险判断或 merge 决策。
+7. 阶段性或部分交付 PR 使用 `Refs #<issue>`；只有任务卡明确允许完整关闭时才使用 `Closes/Fixes/Resolves #<issue>`。
+8. 默认基于仓库默认分支创建 `codex/<short-task>` 分支；一个任务卡对应一个分支和一个 PR。
+9. Commit 必须是原子的，不机械拆分无意义 commit。
+10. 提交前用 `git -c core.quotepath=false diff --name-only` 和 `git ls-files --others --exclude-standard` 核对文件；提交后用 `git -c core.quotepath=false diff --name-only origin/<base>...HEAD` 核对 PR 相对基线的 changed files。
 
 ## 工作区保护
 

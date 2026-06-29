@@ -65,6 +65,7 @@ class TemplateTests(unittest.TestCase):
         self.assertIn("codex-win body normalize/validate", text)
         self.assertIn("codex-win pr-body ...", text)
         self.assertIn("codex-win gh pr-create/pr-edit/pr-verify", text)
+        self.assertIn("codex-win review-pack", text)
         self.assertIn("codex-win agents lint", text)
         self.assertIn("不静默降级", text)
 
