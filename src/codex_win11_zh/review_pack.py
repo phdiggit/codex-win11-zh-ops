@@ -13,6 +13,7 @@ from .encoding import read_text_auto, write_utf8_no_bom
 from .gh import pr_body_apply, pr_view, run_gh
 from .git import run_git
 from .pr_body import normalize_text
+from .timing import load_timing_input, summarize_timing_metadata
 
 
 DEFAULT_CONFIG = ".codex/review-pack.json"
@@ -28,6 +29,7 @@ PACKAGE_SECTIONS = [
     "## HEAD SNAPSHOT LOCK",
     "## Scope / Ownership",
     "## Commands Run",
+    "## Timing",
     "## Protocol Compliance",
     "## Required Next Actions",
     "## Findings",
@@ -248,9 +250,15 @@ def load_command_summary(path: str | Path | None) -> dict[str, Any]:
             "argv_supported": False,
             "note": "no command log supplied; review-pack did not infer validation success",
             "validation_summary": summarize_validation_metadata({}),
+            "timing_summary": summarize_timing_metadata({}),
         }
-    data = json.loads(Path(path).read_text(encoding="utf-8"))
-    return {"source": str(path), "data": data, "validation_summary": summarize_validation_metadata(data)}
+    data = load_timing_input(path)
+    return {
+        "source": str(path),
+        "data": data,
+        "validation_summary": summarize_validation_metadata(data),
+        "timing_summary": summarize_timing_metadata(data),
+    }
 
 
 def summarize_validation_metadata(data: dict[str, Any]) -> dict[str, Any]:
@@ -425,6 +433,10 @@ def render_review_pack(data: dict[str, Any]) -> str:
             "",
             *_commands_run_lines(commands),
             "",
+            "## Timing",
+            "",
+            *_timing_lines(commands),
+            "",
             "## Protocol Compliance",
             "",
             *_protocol_lines(protocol),
@@ -487,6 +499,37 @@ def _commands_run_lines(commands: dict[str, Any]) -> list[str]:
         json.dumps(commands, ensure_ascii=False, indent=2),
         "```",
     ]
+
+
+def _timing_lines(commands: dict[str, Any]) -> list[str]:
+    timing = commands.get("timing_summary") if isinstance(commands, dict) else None
+    if not isinstance(timing, dict):
+        timing = summarize_timing_metadata({})
+    task = timing.get("measured_task_wall_time", {})
+    command = timing.get("measured_command_time", {})
+    unmeasured = timing.get("unmeasured_time", {})
+    lines = [
+        f"- measured_task_wall_time: `{_duration_or_status(task)}`",
+        f"- measured_command_time: `{_duration_or_status(command)}`",
+        f"- unmeasured_time: `{unmeasured.get('status', 'unknown')}`",
+        f"- timing_confidence: `{timing.get('timing_confidence', 'unavailable')}`",
+    ]
+    note = unmeasured.get("note")
+    if note:
+        lines.append(f"- note: {note}")
+    notes = timing.get("qualitative_notes")
+    if isinstance(notes, list) and notes:
+        lines.append("- qualitative_notes:")
+        lines.extend(_bullet_list([str(note) for note in notes if str(note).strip()]))
+    return lines
+
+
+def _duration_or_status(value: Any) -> str:
+    if not isinstance(value, dict):
+        return "unavailable"
+    if value.get("status") == "measured" and value.get("duration_sec") is not None:
+        return f"{float(value['duration_sec']):.3f} sec"
+    return str(value.get("status") or "unavailable")
 
 
 def _validation_summary_lines(commands: dict[str, Any]) -> list[str]:
@@ -562,6 +605,7 @@ def update_review_pack_for_apply(package_text: str, *, command_log: str | Path |
         commands = load_command_summary(command_log)
         validation = commands["validation_summary"]
         updated = _replace_section_body(updated, "Commands Run", _commands_run_lines(commands))
+        updated = _replace_or_insert_section_body(updated, "Timing", _timing_lines(commands), after_section="Commands Run")
         updated = _set_quick_summary_value(updated, "validation_summary", str(validation.get("validation_summary", "unknown")))
         updated = _set_quick_summary_value(updated, "pr_induced_failures", str(validation.get("pr_induced_failures", "unknown")))
         updated = _set_quick_summary_value(updated, "fixed_baseline_failures", str(validation.get("fixed_baseline_failures", "unknown")))
@@ -582,6 +626,20 @@ def _replace_section_body(text: str, section: str, body_lines: list[str]) -> str
     lines = text.splitlines()
     start, end = bounds
     merged = [*lines[: start + 1], "", *body_lines, *lines[end:]]
+    return normalize_text("\n".join(merged))
+
+
+def _replace_or_insert_section_body(text: str, section: str, body_lines: list[str], *, after_section: str) -> str:
+    bounds = _heading_bounds(text, section)
+    if bounds is not None:
+        return _replace_section_body(text, section, body_lines)
+    after_bounds = _heading_bounds(text, after_section)
+    if after_bounds is None:
+        raise ValueError(f"review package does not contain section marker: {after_section}")
+    lines = text.splitlines()
+    insert_at = after_bounds[1]
+    insertion = ["", f"## {section}", "", *body_lines]
+    merged = [*lines[:insert_at], *insertion, *lines[insert_at:]]
     return normalize_text("\n".join(merged))
 
 

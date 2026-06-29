@@ -30,6 +30,7 @@ from .test_plan import (
     resolve_ref,
     save_state,
 )
+from .timing import DEFAULT_TIMER_STATE_FILE, finish_timer, mark_timer, start_timer
 
 
 def print_json(data: Any) -> None:
@@ -152,7 +153,30 @@ def cmd_run(args: argparse.Namespace) -> int:
     command = list(args.command)
     if command and command[0] == "--":
         command = command[1:]
-    return run_command(command, cwd=args.cwd)
+    return run_command(command, cwd=args.cwd, log_path=args.log, summary=args.summary)
+
+
+def cmd_timer_start(args: argparse.Namespace) -> int:
+    print_json(start_timer(timer_id=args.id, state_path=args.state, note=args.note, restart=args.restart))
+    return 0
+
+
+def cmd_timer_mark(args: argparse.Namespace) -> int:
+    print_json(mark_timer(timer_id=args.id, state_path=args.state, label=args.label, note=args.note))
+    return 0
+
+
+def cmd_timer_finish(args: argparse.Namespace) -> int:
+    print_json(
+        finish_timer(
+            timer_id=args.id,
+            state_path=args.state,
+            output_path=args.output,
+            command_log=args.command_log,
+            note=args.note,
+        )
+    )
+    return 0
 
 
 def cmd_cleanup_generated(args: argparse.Namespace) -> int:
@@ -338,8 +362,32 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("run", help="以 UTF-8 Python 环境运行子命令")
     p.add_argument("--cwd", default=None)
+    p.add_argument("--log", default=None, help="追加 JSONL 命令计时记录")
+    p.add_argument("--summary", default=None, help="写入命令日志的简短摘要")
     p.add_argument("command", nargs=argparse.REMAINDER)
     p.set_defaults(func=cmd_run)
+
+    timer = sub.add_parser("timer", help="轻量 Codex 任务计时")
+    timer_sub = timer.add_subparsers(dest="timer_command", required=True)
+    p = timer_sub.add_parser("start")
+    p.add_argument("--id", required=True)
+    p.add_argument("--state", default=DEFAULT_TIMER_STATE_FILE)
+    p.add_argument("--note", default=None)
+    p.add_argument("--restart", action="store_true")
+    p.set_defaults(func=cmd_timer_start)
+    p = timer_sub.add_parser("mark")
+    p.add_argument("--id", required=True)
+    p.add_argument("--state", default=DEFAULT_TIMER_STATE_FILE)
+    p.add_argument("--label", required=True)
+    p.add_argument("--note", default=None)
+    p.set_defaults(func=cmd_timer_mark)
+    p = timer_sub.add_parser("finish")
+    p.add_argument("--id", required=True)
+    p.add_argument("--state", default=DEFAULT_TIMER_STATE_FILE)
+    p.add_argument("--output", default=None)
+    p.add_argument("--command-log", default=None)
+    p.add_argument("--note", default=None)
+    p.set_defaults(func=cmd_timer_finish)
 
     enc = sub.add_parser("encoding", help="中文文件编码辅助")
     enc_sub = enc.add_subparsers(dest="encoding_command", required=True)

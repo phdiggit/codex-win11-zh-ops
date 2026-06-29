@@ -91,6 +91,10 @@ codex-win install-template --profile strict --target .
 ```text
 codex-win preflight
 codex-win run -- <command...>
+codex-win run --log .tmp/codex-commands.jsonl -- <command...>
+codex-win timer start --id <task-id> --state .tmp/codex-timer.json
+codex-win timer mark --id <task-id> --label <phase> --state .tmp/codex-timer.json
+codex-win timer finish --id <task-id> --state .tmp/codex-timer.json --command-log .tmp/codex-commands.jsonl --output .tmp/codex-timing.json
 codex-win encoding check <path>
 codex-win encoding write-json <path> --input <json-file>
 codex-win body normalize --input <in.md> --output <out.md>
@@ -116,6 +120,26 @@ codex-win evals report --output reports/local.json
 ## 运行包装器
 
 `codex-win run -- <command...>` 只做一件事：在子进程环境中设置 `PYTHONUTF8=1` 和 `PYTHONIOENCODING=utf-8`，然后原样运行命令并返回原始退出码。它不假设项目结构，也不替代 shell lint；适合 Windows 上的 Python、pytest、validator、export、build 等容易受到 cp936/GBK 影响的命令。
+
+需要记录命令耗时时，加 `--log` 追加 UTF-8 / LF JSONL 记录；工具仍返回原始退出码：
+
+```powershell
+codex-win run --log .tmp/codex-commands.jsonl --summary "focused validation" -- python -m unittest discover -s tests
+```
+
+每条记录包含 `started_at`、`finished_at`、`duration_sec`、`command`、`exit_code`、`result` 和可选 `summary`。记录只表示被包装命令的 wall time，不代表 Codex 思考、审查或人工等待总耗时。
+
+## 任务计时
+
+跨多条命令的任务 wall time 可用轻量 timer 记录：
+
+```powershell
+codex-win timer start --id issue390-b2 --state .tmp/codex-timer.json
+codex-win timer mark --id issue390-b2 --label evidence_drafting --state .tmp/codex-timer.json
+codex-win timer finish --id issue390-b2 --state .tmp/codex-timer.json --command-log .tmp/codex-commands.jsonl --output .tmp/codex-timing.json
+```
+
+`timer finish` 输出会分开写明 measured task wall time、measured command time、unmeasured time 和 qualitative notes。未单独测量的人工/推理时间保持 `unknown`，工具不会用 wall time 减 command time 推断“人工耗时”。PR body 中的 timing 必须来自这些测量记录，或明确写 `precise timing unavailable`；不要从感觉写 `total_codex_wall_time` 分钟数。
 
 ## 生成物清理
 
@@ -179,7 +203,7 @@ codex-win review-pack --pr 388 --base GPT --scope-profile governance --output .t
 }
 ```
 
-如果有人工记录的命令日志，可通过 `--command-log commands.json` 放入 `## Commands Run`；未提供时只输出当前进程事实，并把验证结论留给 reviewer。命令日志可区分 current/base/historical：
+如果有人工记录的命令日志，可通过 `--command-log commands.json` 放入 `## Commands Run`；未提供时只输出当前进程事实，并把验证结论留给 reviewer。命令日志可区分 current/base/historical，也可以直接使用 `codex-win run --log` 产生的 JSONL，或 `timer finish --output` 产生的 timing JSON：
 
 ```json
 {
@@ -198,6 +222,18 @@ codex-win review-pack --pr 388 --base GPT --scope-profile governance --output .t
   }
 }
 ```
+
+review package 会额外渲染 `## Timing`：
+
+```text
+## Timing
+- measured_task_wall_time: `unavailable`
+- measured_command_time: `unavailable`
+- unmeasured_time: `unknown`
+- timing_confidence: `unavailable`
+```
+
+只有 command log 或 timer output 中存在测量数据时，字段才会变成具体秒数；未测量时不会生成 per-person 或 per-phase 估算。
 
 写回 PR body 时，先生成 review package，再把 package splice 到现有正文中，最后通过 `gh --body-file` 写回并读回验证：
 
