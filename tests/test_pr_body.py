@@ -3,7 +3,9 @@ from __future__ import annotations
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
+from codex_win11_zh import gh
 from codex_win11_zh.cli import main
 from codex_win11_zh.pr_body import code_fences_balanced, compare_body, normalize_file, validate_file, validate_text
 
@@ -44,6 +46,29 @@ class PrBodyTests(unittest.TestCase):
             self.assertEqual(0, main(["body", "normalize", "--input", str(src), "--output", str(dst)]))
             self.assertEqual(0, main(["body", "validate", str(dst)]))
             self.assertEqual(GOOD, dst.read_text(encoding="utf-8"))
+
+    def test_pr_body_apply_uses_body_file_and_verifies_remote_body(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            body = Path(td) / "body.md"
+            body.write_text(GOOD, encoding="utf-8")
+            calls: list[list[str]] = []
+
+            def fake_run_gh(args: list[str], *, cwd: str | Path | None = None) -> gh.GhResult:
+                calls.append(args)
+                if args[:2] == ["pr", "edit"]:
+                    self.assertIn("--body-file", args)
+                    self.assertNotIn("--body", args)
+                    return gh.GhResult(args=["gh", *args], returncode=0, stdout="", stderr="")
+                if args[:2] == ["pr", "view"]:
+                    payload = {"number": 1, "url": "https://example/pr/1", "body": GOOD, "headRefOid": "abc123"}
+                    return gh.GhResult(args=["gh", *args], returncode=0, stdout=__import__("json").dumps(payload), stderr="")
+                raise AssertionError(args)
+
+            with patch.object(gh, "run_gh", side_effect=fake_run_gh):
+                view = gh.pr_body_apply(pr="1", body_file=body)
+
+            self.assertEqual("abc123", view["headRefOid"])
+            self.assertTrue(any(call[:2] == ["pr", "edit"] for call in calls))
 
 
 if __name__ == "__main__":

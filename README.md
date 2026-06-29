@@ -95,6 +95,7 @@ codex-win encoding check <path>
 codex-win encoding write-json <path> --input <json-file>
 codex-win body normalize --input <in.md> --output <out.md>
 codex-win body validate <body.md>
+codex-win body apply --pr <number-or-url> --body-file <body.md>
 codex-win pr-body normalize --input <in.md> --output <out.md>
 codex-win pr-body validate <body.md>
 codex-win gh preflight
@@ -106,6 +107,7 @@ codex-win shell lint --shell powershell5 --command "..."
 codex-win cleanup generated --profile markdown-exports --target <repo> [--apply]
 codex-win test plan --base origin/main --head HEAD --changed-files changed.txt
 codex-win review-pack --pr <number-or-url> --base <branch> --output .tmp/review-pack.md
+codex-win review-pack apply --pr <number-or-url> --package-file .tmp/review-pack.md --body-file .tmp/pr-body.md
 codex-win agents lint AGENTS.md
 codex-win evals list
 codex-win evals report --output reports/local.json
@@ -161,6 +163,8 @@ codex-win test plan --base origin/main --head HEAD --changed-files .tmp/changed-
 codex-win review-pack --pr 388 --base GPT --scope-profile governance --output .tmp/review-pack.md
 ```
 
+生成包顶部包含 `## Reviewer Quick Summary`，用事实字段提示 `head_status`、`scope_verdict`、`validation_summary`、`pr_induced_failures`、`fixed_baseline_failures`，并固定写明 `merge_judgment: not_provided_by_tool`。
+
 项目可在 `.codex/review-pack.json` 中定义 scope profile：
 
 ```json
@@ -175,7 +179,40 @@ codex-win review-pack --pr 388 --base GPT --scope-profile governance --output .t
 }
 ```
 
-如果有人工记录的命令日志，可通过 `--command-log commands.json` 放入 `## Commands Run`；未提供时只输出当前进程事实，并把验证结论留给 reviewer。
+如果有人工记录的命令日志，可通过 `--command-log commands.json` 放入 `## Commands Run`；未提供时只输出当前进程事实，并把验证结论留给 reviewer。命令日志可区分 current/base/historical：
+
+```json
+{
+  "commands": [
+    {
+      "command": "codex-win run -- python -m pytest -q tests/test_x.py",
+      "result": "passed",
+      "summary": "32 passed",
+      "kind": "current_focused"
+    }
+  ],
+  "validation": {
+    "current_snapshot": [],
+    "base_snapshot": [],
+    "historical": []
+  }
+}
+```
+
+写回 PR body 时，先生成 review package，再把 package splice 到现有正文中，最后通过 `gh --body-file` 写回并读回验证：
+
+```powershell
+codex-win review-pack apply --pr 388 --package-file .tmp/review-pack.md --body-file .tmp/pr-body.md
+```
+
+只需要稳定写回完整 PR body 时，可以直接使用通用入口：
+
+```powershell
+codex-win body validate .tmp/pr-body.md
+codex-win body apply --pr 388 --body-file .tmp/pr-body.md
+```
+
+`review-pack apply` 会替换已有 `# Codex PR Review Package` section，保留 PR body 其它内容，并验证远端正文包含当前 head SHA 和 package marker。
 
 ## hooks
 
