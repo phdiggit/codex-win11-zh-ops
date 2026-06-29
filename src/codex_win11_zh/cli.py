@@ -10,12 +10,24 @@ from typing import Any
 
 from . import __version__
 from .agents_lint import lint_agents_file
+from .cleanup import apply_generated_cleanup, cleanup_plan_to_dict, plan_generated_cleanup
 from .encoding import read_text_auto, roundtrip_check, write_json_utf8
 from .evals import build_report, load_scenarios
 from .gh import preflight as gh_preflight, pr_create, pr_edit, pr_view, verify_pr_view
 from .pr_body import normalize_file, validate_file
+from .runtime import run_command
 from .shell import format_issues, lint_command
 from .stdio import configure_utf8_stdio
+from .test_plan import (
+    DEFAULT_STATE_FILE,
+    build_test_plan,
+    git_changed_files,
+    load_state,
+    read_changed_files,
+    record_full_result,
+    resolve_ref,
+    save_state,
+)
 
 
 def print_json(data: Any) -> None:
@@ -116,6 +128,74 @@ def cmd_shell_lint(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_run(args: argparse.Namespace) -> int:
+    command = list(args.command)
+    if command and command[0] == "--":
+        command = command[1:]
+    return run_command(command, cwd=args.cwd)
+
+
+def cmd_cleanup_generated(args: argparse.Namespace) -> int:
+    plan = plan_generated_cleanup(
+        args.target,
+        profile_name=args.profile,
+        config_path=args.config,
+        extra_patterns=tuple(args.include),
+        extra_excludes=tuple(args.exclude),
+    )
+    result = apply_generated_cleanup(plan) if args.apply else None
+    print_json(cleanup_plan_to_dict(plan, apply=args.apply, result=result))
+    return 0
+
+
+def _print_test_plan_summary(data: dict[str, Any]) -> None:
+    classification = data["classification"]
+    policy = data["policy"]
+    print(data["summary"])
+    print(f"head: {data['head']} ({data['head_sha']})")
+    print(f"changed files: {len(data['changed_files'])}")
+    print(f"full pytest required: {str(classification['full_pytest_required']).lower()}")
+    if classification["focused_tests"]:
+        print("focused tests:")
+        for path in classification["focused_tests"]:
+            print(f"  - {path}")
+    print(f"current-head full: {policy['current_head_full']['reason']}")
+    print(f"base full: {policy['base_head_full']['reason']}")
+
+
+def cmd_test_plan(args: argparse.Namespace) -> int:
+    state_path = args.state_file
+    state = load_state(state_path)
+    base_sha = args.base_sha or resolve_ref(args.base, cwd=args.cwd)
+    head_sha = args.head_sha or resolve_ref(args.head, cwd=args.cwd)
+
+    if args.record_current_full:
+        record_full_result(state, kind="current_full", sha=head_sha, status=args.record_current_full)
+    if args.record_base_full:
+        record_full_result(state, kind="base_full", sha=base_sha, status=args.record_base_full)
+    if args.record_current_full or args.record_base_full:
+        save_state(state_path, state)
+
+    changed_files = read_changed_files(args.changed_files) if args.changed_files else git_changed_files(args.base, args.head, cwd=args.cwd)
+    plan = build_test_plan(
+        base=args.base,
+        head=args.head,
+        base_sha=base_sha,
+        head_sha=head_sha,
+        changed_files=changed_files,
+        state=state,
+        current_full_status=args.current_full_status,
+    )
+
+    if args.format in {"text", "both"}:
+        _print_test_plan_summary(plan.data)
+    if args.format == "both":
+        print("")
+    if args.format in {"json", "both"}:
+        print_json(plan.data)
+    return 0
+
+
 def cmd_agents_lint(args: argparse.Namespace) -> int:
     issues = lint_agents_file(args.path, max_lines=args.max_lines)
     if issues:
@@ -196,6 +276,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--cwd", default=None)
     p.set_defaults(func=cmd_preflight)
 
+    p = sub.add_parser("run", help="以 UTF-8 Python 环境运行子命令")
+    p.add_argument("--cwd", default=None)
+    p.add_argument("command", nargs=argparse.REMAINDER)
+    p.set_defaults(func=cmd_run)
+
     enc = sub.add_parser("encoding", help="中文文件编码辅助")
     enc_sub = enc.add_subparsers(dest="encoding_command", required=True)
     p = enc_sub.add_parser("check", help="检查文件编码和 mojibake")
@@ -265,6 +350,35 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--shell", default=None)
     p.add_argument("--command", required=True)
     p.set_defaults(func=cmd_shell_lint)
+
+    cleanup = sub.add_parser("cleanup", help="生成物清理工具")
+    cleanup_sub = cleanup.add_subparsers(dest="cleanup_command", required=True)
+    p = cleanup_sub.add_parser("generated", help="按显式 profile 清理生成物")
+    p.add_argument("--profile", default="markdown-exports")
+    p.add_argument("--target", required=True)
+    p.add_argument("--config", default=None)
+    p.add_argument("--include", action="append", default=[])
+    p.add_argument("--exclude", action="append", default=[])
+    mode = p.add_mutually_exclusive_group()
+    mode.add_argument("--apply", action="store_true", help="执行删除；默认只做 dry-run")
+    mode.add_argument("--dry-run", dest="apply", action="store_false", help="只报告将删除的文件")
+    p.set_defaults(func=cmd_cleanup_generated, apply=False)
+
+    test = sub.add_parser("test", help="验证预算和计划")
+    test_sub = test.add_subparsers(dest="test_command", required=True)
+    p = test_sub.add_parser("plan", help="规划 focused/full pytest 预算")
+    p.add_argument("--base", default="origin/main")
+    p.add_argument("--head", default="HEAD")
+    p.add_argument("--base-sha", default=None)
+    p.add_argument("--head-sha", default=None)
+    p.add_argument("--changed-files", default=None)
+    p.add_argument("--cwd", default=None)
+    p.add_argument("--state-file", default=DEFAULT_STATE_FILE)
+    p.add_argument("--current-full-status", choices=["passed", "failed"], default=None)
+    p.add_argument("--record-current-full", choices=["passed", "failed"], default=None)
+    p.add_argument("--record-base-full", choices=["passed", "failed"], default=None)
+    p.add_argument("--format", choices=["both", "json", "text"], default="both")
+    p.set_defaults(func=cmd_test_plan)
 
     ag = sub.add_parser("agents", help="AGENTS.md 检查")
     ag_sub = ag.add_subparsers(dest="agents_command", required=True)
