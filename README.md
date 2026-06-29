@@ -163,7 +163,7 @@ codex-win test plan --base origin/main --head HEAD --changed-files .tmp/changed-
 codex-win review-pack --pr 388 --base GPT --scope-profile governance --output .tmp/review-pack.md
 ```
 
-生成包顶部包含 `## Reviewer Quick Summary`，用事实字段提示 `head_status`、`scope_verdict`、`validation_summary`、`pr_induced_failures`、`fixed_baseline_failures`，并固定写明 `merge_judgment: not_provided_by_tool`。
+生成包顶部包含 `## Reviewer Quick Summary`，用事实字段提示 `head_status_at_generation`、`head_status_after_apply`、`scope_verdict`、`validation_summary`、`pr_induced_failures`、`fixed_baseline_failures`，并固定写明 `merge_judgment: not_provided_by_tool`。未提供 `--scope-profile` 时，`scope_verdict` 会输出 `unclassified`；这只表示工具没有做 ownership judgment，不表示业务范围已经通过审查。
 
 项目可在 `.codex/review-pack.json` 中定义 scope profile：
 
@@ -202,8 +202,10 @@ codex-win review-pack --pr 388 --base GPT --scope-profile governance --output .t
 写回 PR body 时，先生成 review package，再把 package splice 到现有正文中，最后通过 `gh --body-file` 写回并读回验证：
 
 ```powershell
-codex-win review-pack apply --pr 388 --package-file .tmp/review-pack.md --body-file .tmp/pr-body.md
+codex-win review-pack apply --pr 388 --package-file .tmp/review-pack.md --body-file .tmp/pr-body.md --command-log commands.json
 ```
+
+`review-pack apply` 写回前会把 `head_status_after_apply` 更新为 `current`。如果提供 `--command-log`，它会用同一份日志重写 `## Commands Run` 的人工摘要和 JSON block，并同步 quick summary；如果没有日志，但 package 中已有人工填写的验证摘要行，apply 也会把这些 metadata 同步进同一 JSON block，避免同一节出现两套验证事实。
 
 只需要稳定写回完整 PR body 时，可以直接使用通用入口：
 
@@ -212,7 +214,7 @@ codex-win body validate .tmp/pr-body.md
 codex-win body apply --pr 388 --body-file .tmp/pr-body.md
 ```
 
-`review-pack apply` 会替换已有 `# Codex PR Review Package` section；正文侧也兼容旧的 `## Codex PR Review Package v1.1` section，避免追加第二份 review package。写回时会保留 PR body 其它内容，并验证远端正文包含当前 head SHA 和 package marker。
+`review-pack apply` 会替换已有 `# Codex PR Review Package` section；正文侧也兼容旧的 `## Codex PR Review Package v1.1` section，避免追加第二份 review package。写回时会保留 PR body 其它内容，并验证远端正文包含当前 head SHA 和 package marker。生成的 package 默认包含 `## Required Next Actions`，提醒 reviewer 手动审查项目特定 findings，并等待远端检查，除非这些检查已经由 command log 明确提供。
 
 ## hooks
 

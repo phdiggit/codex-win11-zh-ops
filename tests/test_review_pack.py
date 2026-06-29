@@ -19,6 +19,7 @@ from codex_win11_zh.review_pack import (
     render_review_pack,
     splice_review_pack_into_body,
     summarize_validation_metadata,
+    update_review_pack_for_apply,
     write_review_pack,
 )
 
@@ -73,7 +74,7 @@ class ReviewPackTests(unittest.TestCase):
     def test_scope_without_profile_keeps_fact_layer_broad(self) -> None:
         result = classify_scope(["README.md"], config={}, profile_name=None)
 
-        self.assertEqual("clean", result["scope_verdict"])
+        self.assertEqual("unclassified", result["scope_verdict"])
         self.assertEqual(["README.md"], result["in_scope"])
         self.assertIn("no scope profile", result["note"])
 
@@ -188,9 +189,54 @@ head_sha: abcdef123456
 
         for section in PACKAGE_SECTIONS:
             self.assertIn(section, markdown)
-        self.assertIn("- head_status: `current`", markdown)
+        self.assertIn("- head_status_at_generation: `current`", markdown)
+        self.assertIn("- head_status_after_apply: `unknown`", markdown)
         self.assertIn("- validation_summary: `unknown`", markdown)
+        self.assertIn("## Required Next Actions", markdown)
+        self.assertIn("Review project-specific findings manually.", markdown)
         self.assertIn("merge_judgment: `not_provided_by_tool`", markdown)
+
+    def test_update_review_pack_for_apply_marks_head_current(self) -> None:
+        package = "# Codex PR Review Package\n\n## Reviewer Quick Summary\n\n- head_status_at_generation: `unknown`\n- head_status_after_apply: `unknown`\n\n## Commands Run\n\n- validation_summary: `unknown`\n\n```json\n{}\n```\n"
+
+        updated = update_review_pack_for_apply(package)
+
+        self.assertIn("- head_status_at_generation: `unknown`", updated)
+        self.assertIn("- head_status_after_apply: `current`", updated)
+
+    def test_update_review_pack_for_apply_rewrites_command_log_summary_and_json(self) -> None:
+        package = "# Codex PR Review Package\n\n## Reviewer Quick Summary\n\n- head_status_at_generation: `unknown`\n- head_status_after_apply: `unknown`\n- validation_summary: `unknown`\n- pr_induced_failures: `unknown`\n- fixed_baseline_failures: `unknown`\n\n## Commands Run\n\n- validation_summary: `unknown`\n\n```json\n{\"validation_summary\": \"unknown\"}\n```\n\n## Protocol Compliance\n\n- unknown\n"
+        with tempfile.TemporaryDirectory() as td:
+            log_path = Path(td) / "commands.json"
+            log_path.write_text(
+                json.dumps(
+                    {
+                        "validation": {
+                            "current_snapshot": [{"command": "focused", "result": "passed", "summary": "3 passed"}],
+                            "base_snapshot": [{"command": "old base", "result": "failed", "summary": "known baseline"}],
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            updated = update_review_pack_for_apply(package, command_log=log_path)
+
+        self.assertIn("- validation_summary: `passed`", updated)
+        self.assertIn("- fixed_baseline_failures: `listed`", updated)
+        self.assertIn('"validation_summary": "passed"', updated)
+        self.assertNotIn('"validation_summary": "unknown"', updated)
+
+    def test_update_review_pack_for_apply_syncs_manual_validation_metadata_to_json(self) -> None:
+        package = "# Codex PR Review Package\n\n## Reviewer Quick Summary\n\n- head_status_at_generation: `unknown`\n- head_status_after_apply: `unknown`\n- validation_summary: `unknown`\n- pr_induced_failures: `unknown`\n- fixed_baseline_failures: `unknown`\n\n## Commands Run\n\n- validation_summary: `pass`\n- pr_induced_failures: `none_known`\n\n```json\n{\"validation_summary\": {\"validation_summary\": \"unknown\", \"pr_induced_failures\": \"unknown\"}}\n```\n\n## Protocol Compliance\n\n- unknown\n"
+
+        updated = update_review_pack_for_apply(package)
+
+        self.assertIn("- validation_summary: `pass`", updated)
+        self.assertIn("- pr_induced_failures: `none_known`", updated)
+        self.assertIn('"validation_summary": "pass"', updated)
+        self.assertIn('"pr_induced_failures": "none_known"', updated)
+        self.assertNotIn('"pr_induced_failures": "unknown"', updated)
 
     def test_splice_review_pack_replaces_existing_package_section(self) -> None:
         body = "# 摘要\n\nKeep me.\n\n# Codex PR Review Package\n\nold\n\n# 尾部\n\nKeep tail.\n"
@@ -231,6 +277,7 @@ head_sha: abcdef123456
             def fake_apply(*, pr: str, body_file: str | Path, cwd=None, require_sections: bool = True):
                 text = Path(body_file).read_text(encoding="utf-8")
                 self.assertIn("# Codex PR Review Package", text)
+                self.assertIn("- head_status_after_apply: `current`", text)
                 self.assertIn("head123", text)
                 return {**view, "body": text}
 
