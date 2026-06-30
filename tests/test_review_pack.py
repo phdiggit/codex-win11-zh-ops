@@ -6,9 +6,11 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from codex_win11_zh.gh import GhResult
 from codex_win11_zh.review_pack import (
     PACKAGE_SECTIONS,
     ReviewSnapshot,
+    _fetch_changed_files,
     apply_review_pack_to_pr,
     build_review_pack_data,
     check_pr_body_protocol,
@@ -123,6 +125,16 @@ head_sha: abcdef123456
 
         self.assertEqual("unknown", protocol["changed_files_section_present"]["status"])
         self.assertEqual("unknown", protocol["changed_files_match_current_diff"]["status"])
+
+    def test_fetch_changed_files_decodes_git_quoted_chinese_paths_from_gh(self) -> None:
+        quoted_path = r'"docs/\346\225\260\346\215\256.md"'
+        gh_result = GhResult(args=["gh"], returncode=0, stdout=f"{quoted_path}\nREADME.md\n", stderr="")
+
+        with patch("codex_win11_zh.review_pack.run_gh", return_value=gh_result):
+            files, source = _fetch_changed_files("392", base="GPT", head_sha="head123")
+
+        self.assertEqual("gh pr diff --name-only", source)
+        self.assertEqual(["README.md", "docs/数据.md"], files)
 
     def test_command_log_json_is_embedded_as_fact_source(self) -> None:
         with tempfile.TemporaryDirectory() as td:

@@ -60,7 +60,50 @@ def _utc_and_local_now() -> tuple[str, str]:
 
 
 def _normalize_path(value: str) -> str:
-    return value.strip().replace("\\", "/").lstrip("\ufeff")
+    text = value.strip().lstrip("\ufeff")
+    text = _decode_git_quoted_path(text)
+    return text.replace("\\", "/")
+
+
+def _decode_git_quoted_path(value: str) -> str:
+    text = value
+    quoted = len(text) >= 2 and text[0] == '"' and text[-1] == '"'
+    has_octal_escape = re.search(r"\\[0-7]{3}", text) is not None
+    if not quoted and not has_octal_escape:
+        return text
+
+    if quoted:
+        text = text[1:-1]
+
+    data = bytearray()
+    index = 0
+    while index < len(text):
+        char = text[index]
+        if char == "\\" and index + 1 < len(text):
+            nxt = text[index + 1]
+            octal = text[index + 1 : index + 4]
+            if len(octal) == 3 and all("0" <= digit <= "7" for digit in octal):
+                data.append(int(octal, 8))
+                index += 4
+                continue
+            escape_map = {
+                "a": 0x07,
+                "b": 0x08,
+                "t": 0x09,
+                "n": 0x0A,
+                "v": 0x0B,
+                "f": 0x0C,
+                "r": 0x0D,
+                "\\": 0x5C,
+                '"': 0x22,
+            }
+            if nxt in escape_map:
+                data.append(escape_map[nxt])
+                index += 2
+                continue
+        data.extend(char.encode("utf-8"))
+        index += 1
+    return data.decode("utf-8", errors="replace")
 
 
 def _pattern_matches(path: str, pattern: str) -> bool:
