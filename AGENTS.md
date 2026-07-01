@@ -33,12 +33,13 @@ tests/                  标准库 unittest 测试
 
 1. 用户可见文档、注释和报告默认使用中文。
 2. Python 源码、函数名、参数名、JSON 字段名保持英文。
-3. 中文 Markdown、JSON、PR body、评论正文不得通过 PowerShell inline 或管道传递。
-4. 中文长文本先写 UTF-8 文件，再传给 `gh --body-file` 或其它目标程序。
-5. Windows PowerShell 5.1 不使用 `&&`、`||` 或 Bash here-doc。
-6. 连续步骤拆成多条命令，或使用 PowerShell 原生控制流。
-7. Git 状态和 diff 文件名核对使用 `git -c core.quotepath=false`。
-8. 新增文本文件默认 UTF-8；`.ps1` 如需要兼容 Windows PowerShell 5.1 中文输出，可显式 UTF-8 BOM。
+3. 涉及 PowerShell 的命令一律调用 `pwsh.exe`；只有 Windows PowerShell 5.1 专属兼容验证或项目明确要求时才用 `powershell.exe`。
+4. 在 `pwsh` 中使用 PowerShell 语法；可以使用 `&&`、`||`，但不要使用 Bash here-doc。
+5. 中文 Markdown、JSON、PR body、评论正文不得通过 PowerShell inline、管道或 here-string 传递；改用 UTF-8 文件、Python `pathlib`、仓库工具或 Git Bash here-doc。
+6. 需要 Bash 工具链、POSIX 管道、`.sh` 脚本或 Bash here-doc 时使用 Git Bash；不要用 `pwsh` 硬替 Bash。
+7. 若出现中文乱码、JSON 损坏或复杂嵌套引号，优先改为 UTF-8 临时文件或 Python 脚本，不继续调试易碎的 inline 字符串。
+8. Git 状态和 diff 文件名核对使用 `git -c core.quotepath=false`。
+9. 新增文本文件默认 UTF-8；`.ps1` 如需要兼容 Windows PowerShell 5.1 中文输出，可显式 UTF-8 BOM。
 
 ## GitHub 与 PR
 

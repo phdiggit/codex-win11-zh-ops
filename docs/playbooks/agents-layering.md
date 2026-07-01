@@ -2,7 +2,7 @@
 
 ## 三层结构
 
-1. 全局 AGENTS：个人机器稳定事实，例如 Win11 简中、PowerShell 5.1、gh 优先。
+1. 全局 AGENTS：个人机器稳定事实，例如 Win11 简中、`pwsh.exe` 优先、gh 优先。
 2. 项目根 AGENTS：仓库生命周期、目录职责、验证入口、危险边界。
 3. 子目录 AGENTS：docs/scripts/generated 等局部强约束。
 

@@ -1,15 +1,15 @@
 # Win11 简体中文 Codex 全局规则模板
 
-适用范围：Windows 11 + 简体中文用户环境。建议放在 `~/.codex/AGENTS.md` 或全局 override 中；项目仓库仍应有自己的根 `AGENTS.md`。
+适用范围：Windows 11 + 简体中文用户环境。涉及 PowerShell 的场景一律优先使用 PowerShell 7.x (`pwsh.exe`)；项目仓库仍应有自己的根 `AGENTS.md`。
 
 ## Shell
 
 1. 默认环境为 Windows 11 + 简体中文。
-2. Windows PowerShell 5.1 不使用 `&&`、`||` 或 Bash here-doc。
-3. 连续步骤拆成多条命令，或使用 PowerShell 原生控制流：`if ($?) { ... }`。
-4. 中文 Markdown、JSON、PR body、Issue/PR 评论不得通过 PowerShell inline、管道或 here-string 传递。
-5. 需要中文文件读写时优先使用 Python `pathlib`，显式指定 UTF-8。
-6. 当前 shell 能可靠执行时保持当前 shell，避免 PowerShell 与 Bash 多层嵌套引号。
+2. 涉及 PowerShell 的命令一律调用 `pwsh.exe`；只有 Windows PowerShell 5.1 专属兼容验证或项目明确要求时才用 `powershell.exe`。
+3. 在 `pwsh` 中使用 PowerShell 语法；可以使用 `&&`、`||`，但不要使用 Bash here-doc。
+4. 中文 Markdown、JSON、PR body、Issue/PR 评论不得通过 PowerShell inline、管道或 here-string 传递；改用 UTF-8 文件、Python `pathlib`、仓库工具或 Git Bash here-doc。
+5. 需要 Bash 工具链、POSIX 管道、`.sh` 脚本或 Bash here-doc 时使用 Git Bash；不要用 `pwsh` 硬替 Bash。
+6. 若出现中文乱码、JSON 损坏或复杂嵌套引号，优先改为 UTF-8 临时文件或 Python 脚本，不继续调试易碎的 inline 字符串。
 
 ## GitHub
 

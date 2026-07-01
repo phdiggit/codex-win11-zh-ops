@@ -6,6 +6,6 @@
 2. 不把当前 Issue、当前分支、临时 SHA、当天状态等动态事实长期写入文档，除非文档就是任务记录。
 3. 修改事实性说明前先定位事实源；不要凭记忆改关键流程。
 4. 中文 Markdown 默认 UTF-8 no BOM。
-5. Markdown 中的 PowerShell 5.1 示例不得使用 `&&`、`||` 或 Bash here-doc。
+5. Markdown 中涉及 PowerShell 的示例默认写 `pwsh.exe` / PowerShell 7 口径；只有 5.1 兼容示例才标明 5.1，并不得使用 `&&`、`||` 或 Bash here-doc。
 6. PR body、任务卡模板、报告模板必须包含验证、风险和未解决事项字段。
 7. 大段示例输出不要复制完整日志，只保留关键错误、复现命令和判断。

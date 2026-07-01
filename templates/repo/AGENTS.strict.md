@@ -41,14 +41,18 @@
 ## Shell、编码与路径
 
 1. 用户可见文档、注释和报告默认使用中文；schema 字段名、manifest 键名、函数名、参数名和路径变量名保持英文。
-2. 中文 Markdown、JSON、PR body、评论正文不得通过 PowerShell inline、管道或 here-string 传递；先写 UTF-8 文件，再交给目标程序。
-3. 处理中文 Markdown、JSON 或文本编码时，优先运行 `codex-win encoding check <path>`；需要写 JSON 时优先用 `codex-win encoding write-json <path> --input <json-file>`。
-4. Windows PowerShell 5.1 不使用 `&&`、`||` 或 Bash here-doc；连续步骤拆成单条命令，或使用 PowerShell 原生控制流；准备执行复杂命令前，优先运行 `codex-win shell lint --shell powershell5 --command "<command>"` 检查 shell 方言和 inline `gh --body` 风险。
-5. Windows 上运行 Python、pytest、validator、export、build 等子进程时，优先使用 `codex-win run -- <command...>`，让子进程继承 `PYTHONUTF8=1` 和 `PYTHONIOENCODING=utf-8`；需要 PR timing 证据时使用 `codex-win run --log .tmp/codex-commands.jsonl -- <command...>`。
-6. Git 状态和 diff 核对使用 `git -c core.quotepath=false`。
-7. `.ps1` 文件如需要兼容 Windows PowerShell 5.1 中文输出，可使用 UTF-8 BOM。
-8. 自动化目录尽量使用英文、数字、短横线，避免 WinPE、cmd、SMB 和日志编码问题。
-9. 只有在 `codex-win` 不可用、当前任务不属于以上风险场景，或用户明确要求时，才直接使用原生命令替代；工具不可用时先报告原因，再使用最小等价命令，不静默降级。
+2. 涉及 PowerShell 的命令默认调用 `pwsh.exe`；只有 Windows PowerShell 5.1 专属兼容验证或项目明确要求时才用 `powershell.exe`。
+3. 在 `pwsh` 中使用 PowerShell 语法；可以使用 `&&`、`||`，但不要使用 Bash here-doc。
+4. 中文 Markdown、JSON、PR body、评论正文不得通过 PowerShell inline、管道或 here-string 传递；先写 UTF-8 文件，再交给目标程序。
+5. 处理中文 Markdown、JSON 或文本编码时，优先运行 `codex-win encoding check <path>`；需要写 JSON 时优先用 `codex-win encoding write-json <path> --input <json-file>`。
+6. 需要 Bash 工具链、POSIX 管道、`.sh` 脚本或 Bash here-doc 时使用 Git Bash；不要用 `pwsh` 硬替 Bash。
+7. 若出现中文乱码、JSON 损坏或复杂嵌套引号，优先改为 UTF-8 临时文件或 Python 脚本，不继续调试易碎的 inline 字符串。
+8. 准备执行 Windows PowerShell 5.1 兼容命令前，优先运行 `codex-win shell lint --shell powershell5 --command "<command>"` 检查 shell 方言和 inline `gh --body` 风险。
+9. Windows 上运行 Python、pytest、validator、export、build 等子进程时，优先使用 `codex-win run -- <command...>`，让子进程继承 `PYTHONUTF8=1` 和 `PYTHONIOENCODING=utf-8`；需要 PR timing 证据时使用 `codex-win run --log .tmp/codex-commands.jsonl -- <command...>`。
+10. Git 状态和 diff 核对使用 `git -c core.quotepath=false`。
+11. `.ps1` 文件如需要兼容 Windows PowerShell 5.1 中文输出，可使用 UTF-8 BOM。
+12. 自动化目录尽量使用英文、数字、短横线，避免 WinPE、cmd、SMB 和日志编码问题。
+13. 只有在 `codex-win` 不可用、当前任务不属于以上风险场景，或用户明确要求时，才直接使用原生命令替代；工具不可用时先报告原因，再使用最小等价命令，不静默降级。
 
 ## GitHub、Commit 与 PR
 
@@ -81,7 +85,7 @@
 |---|---|
 | 文档 | `git diff --check`、链接/引用搜索、changed files 核对；修改 AGENTS 或模板后运行 `codex-win agents lint <path>` |
 | Python | `codex-win run -- python -m compileall src`、定向 unittest、相关 CLI smoke test；full pytest 同一 head SHA 最多运行一次 |
-| PowerShell | `codex-win shell lint --shell powershell5 --command "..."`、语法解析、定向测试、禁止真实危险动作 |
+| PowerShell | `pwsh.exe` 语法解析；5.1 兼容命令用 `codex-win shell lint --shell powershell5 --command "..."`；定向测试、禁止真实危险动作 |
 | GitHub/PR | `codex-win body validate`、`codex-win gh pr-create/pr-edit/pr-verify`、gh view 读回验证 |
 | hooks | `codex-win shell lint`、stdin JSON smoke test |
 
@@ -104,7 +108,7 @@
 
 1. 本地 `gh` 已认证时，禁止优先使用 GitHub connector；connector 只能作为失败后的 fallback。
 2. 所有中文 PR body、Issue body、评论正文、release notes 都必须通过 `codex-win body normalize/validate` 或项目等价工具。
-3. PowerShell 中出现 `&&`、`||`、Bash here-doc、`gh --body "..."` 视为必须修正的命令错误。
+3. Windows PowerShell 5.1 中出现 `&&`、`||`，或任意 PowerShell 场景出现 Bash here-doc、`gh --body "..."`，视为必须修正的命令错误。
 4. 生成文件默认不直接编辑；先寻找 generator、manifest 或源文件。
 5. 如果验证需要真实危险动作，必须停止并报告，不用假验证冒充通过。
 6. Windows 子进程默认通过 `codex-win run -- ...` 执行；只有非 Python、不会读写中文且无编码风险的轻量命令才可直接运行。
