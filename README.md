@@ -92,6 +92,11 @@ codex-win install-template --profile strict --target .
 codex-win preflight
 codex-win run -- <command...>
 codex-win run --log .tmp/codex-commands.jsonl -- <command...>
+codex-win agent run-plan --tasks-jsonl tmp/codex_tasks.jsonl --output-root tmp/agent_run --max-workers 4 --background
+codex-win agent status --output-root tmp/agent_run
+codex-win agent wait --output-root tmp/agent_run
+codex-win agent kill --output-root tmp/agent_run
+codex-win agent collect --output-root tmp/agent_run
 codex-win timer start --id <task-id> --state .tmp/codex-timer.json
 codex-win timer mark --id <task-id> --label <phase> --state .tmp/codex-timer.json
 codex-win timer finish --id <task-id> --state .tmp/codex-timer.json --command-log .tmp/codex-commands.jsonl --output .tmp/codex-timing.json
@@ -128,6 +133,48 @@ codex-win run --log .tmp/codex-commands.jsonl --summary "focused validation" -- 
 ```
 
 每条记录包含 `started_at`、`finished_at`、`duration_sec`、`command`、`exit_code`、`result` 和可选 `summary`。记录只表示被包装命令的 wall time，不代表 Codex 思考、审查或人工等待总耗时。
+
+## Agent 运行监管
+
+`codex-win agent run-plan` 从现有 `codex_tasks.jsonl` 读取任务，负责 Codex CLI 子进程的后台启动、并发、超时、心跳、stdout/stderr、last message、结果和 Windows 进程树清理。它只理解机械运行契约，不理解项目业务 schema；例如 retrieval_v2 的 patch 字段、人才等级、身份归属和落库 readiness 仍由业务仓库校验。
+
+```powershell
+codex-win agent run-plan `
+  --tasks-jsonl tmp\profile_basis\codex_tasks.jsonl `
+  --output-root tmp\profile_basis\agent_run `
+  --cwd E:\code\git\my-cloud\github\emperor-evaluation `
+  --background `
+  --max-workers 4 `
+  --timeout-seconds 1800 `
+  --sandbox-profile read-only
+```
+
+`codex_tasks.jsonl` 第一版兼容常见字段：`task_code`、`prompt_path`、`patch_path`、`last_message_path`、`log_path`、`argv`。默认不会原样执行任务里的 `argv`，而是由 `codex-win` 重新组装 read-only Codex 命令；只有显式加 `--respect-task-argv` 时才按任务文件原样执行。需要写工作区时用 `--sandbox-profile local-write`，危险 bypass 必须显式写 `--sandbox-profile bypass`。
+
+每个 `output-root` 会写入这些通用文件：
+
+```text
+status.json      当前 run 状态、任务状态、PID、heartbeat、totals
+tasks.jsonl      正规化后的任务快照
+children.jsonl   supervisor 和 task 子进程事件
+results.jsonl    每个 task 的退出码、耗时、timeout、usage 和输出路径
+summary.json     collect 或最终状态摘要
+logs/*           默认 task stdout/event log、stderr 和 last message；若任务指定 log_path/last_message_path 则写到任务指定位置
+```
+
+常用收尾命令：
+
+```powershell
+codex-win agent status --output-root tmp\profile_basis\agent_run
+codex-win agent wait --output-root tmp\profile_basis\agent_run --timeout-seconds 1800
+codex-win agent collect --output-root tmp\profile_basis\agent_run
+codex-win agent kill --output-root tmp\profile_basis\agent_run
+codex-win agent cleanup-stale --output-root tmp\profile_basis\agent_run
+```
+
+`collect` 会检查重复 `task_code`、重复结果、last message 是否存在/为空，以及 patch/event JSONL 是否可解析；它不判断 JSONL payload 的业务含义，也不 apply patch、不写数据库。
+
+dry-run 产生的 `planned` 任务不会做 last message、patch 或 event log 输出检查，避免把未执行任务和历史日志误判为失败。`kill` 和 `cleanup-stale` 会在 `status.json` / `children.jsonl` 中记录 `target_pids` 与 `killed_pids`，用于核对本次清理尝试覆盖了哪些 supervisor/task 进程。
 
 ## 任务计时
 

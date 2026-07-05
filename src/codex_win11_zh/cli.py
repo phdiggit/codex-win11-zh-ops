@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from . import __version__
+from .agent import collect_run, cleanup_stale_run, kill_run, run_plan, status_run, wait_run
 from .agents_lint import lint_agents_file
 from .cleanup import apply_generated_cleanup, cleanup_plan_to_dict, plan_generated_cleanup
 from .encoding import read_text_auto, roundtrip_check, write_json_utf8
@@ -154,6 +155,54 @@ def cmd_run(args: argparse.Namespace) -> int:
     if command and command[0] == "--":
         command = command[1:]
     return run_command(command, cwd=args.cwd, log_path=args.log, summary=args.summary)
+
+
+def cmd_agent_run_plan(args: argparse.Namespace) -> int:
+    print_json(
+        run_plan(
+            tasks_jsonl=args.tasks_jsonl,
+            output_root=args.output_root,
+            cwd=args.cwd,
+            max_workers=args.max_workers,
+            timeout_seconds=args.timeout_seconds,
+            sandbox_profile=args.sandbox_profile,
+            codex_bin=args.codex_bin,
+            background=args.background,
+            dry_run=args.dry_run,
+            respect_task_argv=args.respect_task_argv,
+            search=args.search,
+        )
+    )
+    return 0
+
+
+def cmd_agent_status(args: argparse.Namespace) -> int:
+    print_json(status_run(args.output_root))
+    return 0
+
+
+def cmd_agent_wait(args: argparse.Namespace) -> int:
+    status = wait_run(args.output_root, timeout_seconds=args.timeout_seconds, poll_seconds=args.poll_seconds)
+    print_json(status)
+    if status.get("wait_timeout"):
+        return 1
+    return 0 if status.get("status") in {"planned", "succeeded"} else 1
+
+
+def cmd_agent_kill(args: argparse.Namespace) -> int:
+    print_json(kill_run(args.output_root))
+    return 0
+
+
+def cmd_agent_collect(args: argparse.Namespace) -> int:
+    summary = collect_run(args.output_root)
+    print_json(summary)
+    return 0 if summary.get("ok") else 1
+
+
+def cmd_agent_cleanup_stale(args: argparse.Namespace) -> int:
+    print_json(cleanup_stale_run(args.output_root))
+    return 0
 
 
 def cmd_timer_start(args: argparse.Namespace) -> int:
@@ -366,6 +415,39 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--summary", default=None, help="写入命令日志的简短摘要")
     p.add_argument("command", nargs=argparse.REMAINDER)
     p.set_defaults(func=cmd_run)
+
+    agent = sub.add_parser("agent", help="Codex CLI 后台智能体运行监管")
+    agent_sub = agent.add_subparsers(dest="agent_command", required=True)
+    p = agent_sub.add_parser("run-plan", help="从 codex_tasks.jsonl 运行 Codex 任务计划")
+    p.add_argument("--tasks-jsonl", required=True)
+    p.add_argument("--output-root", required=True)
+    p.add_argument("--cwd", default=None)
+    p.add_argument("--background", action="store_true")
+    p.add_argument("--dry-run", action="store_true")
+    p.add_argument("--max-workers", type=int, default=1)
+    p.add_argument("--timeout-seconds", type=int, default=1800)
+    p.add_argument("--sandbox-profile", choices=["read-only", "local-write", "bypass"], default="read-only")
+    p.add_argument("--codex-bin", default="codex")
+    p.add_argument("--respect-task-argv", action="store_true", help="按任务文件中的 argv 原样执行；默认由 codex-win 重组安全 Codex 命令")
+    p.add_argument("--search", action="store_true", help="允许 Codex CLI 使用搜索相关能力；默认关闭浏览/搜索工具")
+    p.set_defaults(func=cmd_agent_run_plan)
+    p = agent_sub.add_parser("status", help="读取 agent run status.json")
+    p.add_argument("--output-root", required=True)
+    p.set_defaults(func=cmd_agent_status)
+    p = agent_sub.add_parser("wait", help="等待 agent run 进入终态")
+    p.add_argument("--output-root", required=True)
+    p.add_argument("--timeout-seconds", type=int, default=0)
+    p.add_argument("--poll-seconds", type=float, default=1.0)
+    p.set_defaults(func=cmd_agent_wait)
+    p = agent_sub.add_parser("kill", help="终止 agent run 进程树")
+    p.add_argument("--output-root", required=True)
+    p.set_defaults(func=cmd_agent_kill)
+    p = agent_sub.add_parser("collect", help="汇总并检查 agent run 机械输出契约")
+    p.add_argument("--output-root", required=True)
+    p.set_defaults(func=cmd_agent_collect)
+    p = agent_sub.add_parser("cleanup-stale", help="清理 supervisor 已退出的残留 agent run")
+    p.add_argument("--output-root", required=True)
+    p.set_defaults(func=cmd_agent_cleanup_stale)
 
     timer = sub.add_parser("timer", help="轻量 Codex 任务计时")
     timer_sub = timer.add_subparsers(dest="timer_command", required=True)
