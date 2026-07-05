@@ -149,7 +149,9 @@ codex-win agent run-plan `
   --sandbox-profile read-only
 ```
 
-`codex_tasks.jsonl` 第一版兼容常见字段：`task_code`、`prompt_path`、`patch_path`、`last_message_path`、`log_path`、`argv`。默认不会原样执行任务里的 `argv`，而是由 `codex-win` 重新组装 read-only Codex 命令；只有显式加 `--respect-task-argv` 时才按任务文件原样执行。需要写工作区时用 `--sandbox-profile local-write`，危险 bypass 必须显式写 `--sandbox-profile bypass`。
+`codex_tasks.jsonl` 第一版兼容常见字段：`task_code`、`prompt_path`、`patch_path`、`last_message_path`、`log_path`、`argv`。也可以声明通用产物契约：`expected_output_path`、`expected_min_bytes`、`expected_line_count`。默认不会原样执行任务里的 `argv`，而是由 `codex-win` 重新组装 read-only Codex 命令；只有显式加 `--respect-task-argv` 时才按任务文件原样执行。两种模式都会把 `prompt_path` 的 UTF-8 内容写入 Codex stdin，并在结果里记录 prompt 字节数和 stdin 写入状态。
+
+需要写工作区时用 `--sandbox-profile local-write`，危险 bypass 必须显式写 `--sandbox-profile bypass`。不使用 `--respect-task-argv` 时，`sandbox-profile` 会覆盖任务原 `argv` 中的 sandbox 选择；`results.jsonl` 的 `command_info` 会记录原 argv sandbox、实际 sandbox、是否发生覆盖。
 
 每个 `output-root` 会写入这些通用文件：
 
@@ -157,7 +159,7 @@ codex-win agent run-plan `
 status.json      当前 run 状态、任务状态、PID、heartbeat、totals
 tasks.jsonl      正规化后的任务快照
 children.jsonl   supervisor 和 task 子进程事件
-results.jsonl    每个 task 的退出码、耗时、timeout、usage 和输出路径
+results.jsonl    每个 task 的退出码、耗时、timeout、usage、prompt/stdin、sandbox、失败摘要和输出路径
 summary.json     collect 或最终状态摘要
 logs/*           默认 task stdout/event log、stderr 和 last message；若任务指定 log_path/last_message_path 则写到任务指定位置
 ```
@@ -172,9 +174,13 @@ codex-win agent kill --output-root tmp\profile_basis\agent_run
 codex-win agent cleanup-stale --output-root tmp\profile_basis\agent_run
 ```
 
+任务成功不只看进程退出码。若 Codex JSON event log 出现 `type=error`、`turn.failed`、usage limit、rate limit、auth error，或 stderr/last message 暗示策略拒绝，任务会标为 `failed`，并在 `results.jsonl` 写入 `error_type`、`error`、`event_analysis`。如果任务声明了 `patch_path`、`expected_output_path` 或最小大小/行数要求，run-plan 会做通用文件存在性检查；不满足时不会标 `succeeded`。
+
 `collect` 会检查重复 `task_code`、重复结果、last message 是否存在/为空，以及 patch/event JSONL 是否可解析；它不判断 JSONL payload 的业务含义，也不 apply patch、不写数据库。
 
 dry-run 产生的 `planned` 任务不会做 last message、patch 或 event log 输出检查，避免把未执行任务和历史日志误判为失败。`kill` 和 `cleanup-stale` 会在 `status.json` / `children.jsonl` 中记录 `target_pids` 与 `killed_pids`，用于核对本次清理尝试覆盖了哪些 supervisor/task 进程。
+
+`status.json` 使用唯一临时文件和 Windows `os.replace` retry 写入；`results.jsonl` / `children.jsonl` 追加写入也会在同一 supervisor 进程内加锁并重试，避免多 worker 互相踩写。
 
 ## 任务计时
 

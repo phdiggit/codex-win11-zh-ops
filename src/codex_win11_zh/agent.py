@@ -17,7 +17,7 @@ from typing import Any
 
 from .encoding import write_json_utf8
 from .runtime import build_runtime_env
-from .timing import append_jsonl, command_to_text, duration_sec, utc_now_iso
+from .timing import command_to_text, duration_sec, utc_now_iso
 
 
 STATUS_FILE = "status.json"
@@ -30,6 +30,10 @@ TERMINAL_RUN_STATUSES = {"planned", "succeeded", "failed", "killed", "stale_clea
 TERMINAL_TASK_STATUSES = {"planned", "succeeded", "failed", "timed_out", "skipped", "killed", "stale_cleaned"}
 SANDBOX_PROFILES = {"read-only", "local-write", "bypass"}
 _BACKGROUND_PROCS: list[subprocess.Popen[str]] = []
+_JSONL_LOCKS: dict[str, threading.Lock] = {}
+EVENT_FAILURE_TYPES = {"error", "turn.failed"}
+USAGE_FAILURE_WORDS = ("usage limit", "rate limit", "quota", "auth", "authentication", "unauthorized", "forbidden", "credit")
+POLICY_FAILURE_WORDS = ("policy", "denied", "not permitted", "permission", "拒绝")
 
 
 class AgentRunError(RuntimeError):
@@ -55,6 +59,24 @@ def write_jsonl(path: str | Path, rows: Sequence[Mapping[str, Any]]) -> None:
     with output.open("w", encoding="utf-8", newline="\n") as handle:
         for row in rows:
             handle.write(json.dumps(dict(row), ensure_ascii=False, separators=(",", ":"), default=str) + "\n")
+
+
+def append_jsonl_safe(path: str | Path, row: Mapping[str, Any]) -> None:
+    output = Path(path)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    key = str(output.resolve())
+    lock = _JSONL_LOCKS.setdefault(key, threading.Lock())
+    text = json.dumps(dict(row), ensure_ascii=False, separators=(",", ":"), default=str) + "\n"
+    with lock:
+        for attempt in range(8):
+            try:
+                with output.open("a", encoding="utf-8", newline="\n") as handle:
+                    handle.write(text)
+                return
+            except OSError:
+                if attempt == 7:
+                    raise
+                time.sleep(0.02 * (attempt + 1))
 
 
 def read_status(output_root: str | Path) -> dict[str, Any]:
@@ -137,7 +159,7 @@ def start_background_run(config: Mapping[str, Any]) -> dict[str, Any]:
         proc = subprocess.Popen(command, cwd=str(cwd), stdout=stdout, stderr=stderr, env=env, **flags)
     _BACKGROUND_PROCS.append(proc)
 
-    append_jsonl(output_root / CHILDREN_FILE, {"event": "supervisor_started", "pid": proc.pid, "at": utc_now_iso(), "command": command_to_text(command)})
+    append_jsonl_safe(output_root / CHILDREN_FILE, {"event": "supervisor_started", "pid": proc.pid, "at": utc_now_iso(), "command": command_to_text(command)})
     initial_status["supervisor_pid"] = proc.pid
     initial_status["command"] = command_to_text(command)
     return initial_status
@@ -170,12 +192,12 @@ def run_plan_foreground(config: Mapping[str, Any], *, launched_in_background: bo
         background=launched_in_background,
     )
     state.write(status="running" if not config.get("dry_run") else "planned")
-    append_jsonl(output_root / CHILDREN_FILE, {"event": "supervisor_active", "pid": os.getpid(), "at": utc_now_iso()})
+    append_jsonl_safe(output_root / CHILDREN_FILE, {"event": "supervisor_active", "pid": os.getpid(), "at": utc_now_iso()})
 
     if bool(config.get("dry_run")):
         for task in tasks:
             state.update_task(str(task["task_code"]), status="planned", updated_at=utc_now_iso())
-            append_jsonl(output_root / RESULTS_FILE, {"task_code": task["task_code"], "status": "planned"})
+            append_jsonl_safe(output_root / RESULTS_FILE, {"task_code": task["task_code"], "status": "planned"})
         return _finish_run(state, "planned")
 
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
@@ -231,11 +253,13 @@ def normalize_tasks(tasks: Sequence[Mapping[str, Any]], *, cwd: Path, output_roo
         last_message_path = _resolve_existing_or_declared_path(row.get("last_message_path"), cwd) or (output_root / "logs" / f"{task_code}.last.md")
         event_log_path = _resolve_existing_or_declared_path(row.get("log_path"), cwd) or (output_root / "logs" / f"{task_code}.events.jsonl")
         patch_path = _resolve_existing_or_declared_path(row.get("patch_path"), cwd)
+        expected_output_path = _resolve_existing_or_declared_path(row.get("expected_output_path"), cwd)
         row["task_code"] = task_code
         row["_codex_win"] = {
             "task_index": index,
             "prompt_path": str(prompt_path),
             "patch_path": str(patch_path) if patch_path is not None else None,
+            "expected_output_path": str(expected_output_path) if expected_output_path is not None else None,
             "last_message_path": str(last_message_path),
             "event_log_path": str(event_log_path),
             "stdout_path": str(event_log_path),
@@ -272,6 +296,7 @@ def run_one_task(
         state.update_task(task_code, status="failed", error=result["error"], finished_at=result["finished_at"])
         return result
     prompt_text = prompt_path.read_text(encoding="utf-8")
+    prompt_bytes = len(prompt_text.encode("utf-8"))
 
     timeout = int(task.get("timeout_seconds") or timeout_seconds)
     command = build_task_command(
@@ -282,12 +307,14 @@ def run_one_task(
         respect_task_argv=respect_task_argv,
         search=search,
     )
+    command_info = build_command_info(task, command=command, sandbox_profile=sandbox_profile, respect_task_argv=respect_task_argv)
     started_at = utc_now_iso()
     started = time.perf_counter()
     stdout_file = stdout_path.open("w", encoding="utf-8", newline="\n")
     stderr_file = stderr_path.open("w", encoding="utf-8", newline="\n")
     proc: subprocess.Popen[str] | None = None
     stdin_writer: threading.Thread | None = None
+    stdin_status: dict[str, Any] = {"attempted": True, "written": False, "bytes": 0}
     try:
         flags: dict[str, Any] = {}
         if os.name == "nt":
@@ -306,12 +333,23 @@ def run_one_task(
             env=build_runtime_env(),
             **flags,
         )
-        state.update_task(task_code, status="running", pid=proc.pid, started_at=started_at, last_seen_at=started_at, command=command_to_text(command))
-        append_jsonl(
+        state.update_task(
+            task_code,
+            status="running",
+            pid=proc.pid,
+            started_at=started_at,
+            last_seen_at=started_at,
+            command=command_to_text(command),
+            prompt_path=str(prompt_path),
+            prompt_bytes=prompt_bytes,
+            stdin=dict(stdin_status),
+            command_info=command_info,
+        )
+        append_jsonl_safe(
             output_root / CHILDREN_FILE,
             {"event": "task_started", "task_code": task_code, "pid": proc.pid, "at": started_at, "command": command_to_text(command)},
         )
-        stdin_writer = start_stdin_writer(proc, prompt_text)
+        stdin_writer = start_stdin_writer(proc, prompt_text, stdin_status)
         deadline = time.perf_counter() + timeout
         next_heartbeat = time.perf_counter() + heartbeat_seconds
         timed_out = False
@@ -351,7 +389,23 @@ def run_one_task(
 
     finished_at = utc_now_iso()
     elapsed = duration_sec(started, time.perf_counter())
+    event_analysis = analyze_codex_events(stdout_path)
+    output_analysis = check_task_outputs(task, paths)
+    process_analysis = analyze_process_text(stderr_path, last_message_path)
     status = "timed_out" if timed_out else ("succeeded" if int(returncode) == 0 else "failed")
+    failure: dict[str, Any] | None = None
+    if timed_out:
+        failure = {"type": "timeout", "message": f"task exceeded timeout_seconds={timeout}"}
+    elif int(returncode) != 0:
+        failure = {"type": "returncode", "message": f"codex process exited with returncode {int(returncode)}"}
+    elif event_analysis.get("failed"):
+        failure = {"type": event_analysis.get("error_type") or "codex_event_failed", "message": event_analysis.get("error_summary") or "Codex event log reported failure"}
+    elif process_analysis.get("failed"):
+        failure = {"type": process_analysis.get("error_type") or "process_output_failed", "message": process_analysis.get("error_summary") or "process output reported failure"}
+    elif output_analysis.get("failed"):
+        failure = {"type": output_analysis.get("error_type") or "missing_expected_output", "message": output_analysis.get("error_summary") or "expected output contract was not satisfied"}
+    if failure is not None and status != "timed_out":
+        status = "failed"
     result = {
         "task_code": task_code,
         "status": status,
@@ -363,19 +417,36 @@ def run_one_task(
         "duration_sec": elapsed,
         "timeout_seconds": timeout,
         "paths": dict(paths),
-        "usage": usage_from_events(stdout_path),
+        "prompt_path": str(prompt_path),
+        "prompt_bytes": prompt_bytes,
+        "stdin": dict(stdin_status),
+        "command_info": command_info,
+        "usage": event_analysis.get("usage", {}),
+        "event_analysis": event_analysis,
+        "output_analysis": output_analysis,
+        "process_analysis": process_analysis,
     }
+    if failure is not None:
+        result["error_type"] = failure["type"]
+        result["error"] = failure["message"]
     state.append_result(result)
     state.update_task(
         task_code,
         status=status,
         returncode=int(returncode),
         timed_out=timed_out,
+        error_type=result.get("error_type"),
+        error=result.get("error"),
         finished_at=finished_at,
         last_seen_at=finished_at,
         duration_sec=elapsed,
+        prompt_path=str(prompt_path),
+        prompt_bytes=prompt_bytes,
+        stdin=dict(stdin_status),
+        command_info=command_info,
+        output_analysis=output_analysis,
     )
-    append_jsonl(output_root / CHILDREN_FILE, {"event": "task_finished", "task_code": task_code, "pid": result["pid"], "at": finished_at, "status": status})
+    append_jsonl_safe(output_root / CHILDREN_FILE, {"event": "task_finished", "task_code": task_code, "pid": result["pid"], "at": finished_at, "status": status})
     return result
 
 
@@ -410,6 +481,34 @@ def build_task_command(
         command.extend(["-a", "never", "-s", sandbox, "exec", "--ephemeral", "--skip-git-repo-check", "--ignore-user-config", "--ignore-rules", "-C", str(cwd)])
     command.extend(["--output-last-message", last_message_path, "--json", "-"])
     return command
+
+
+def build_command_info(task: Mapping[str, Any], *, command: Sequence[str], sandbox_profile: str, respect_task_argv: bool) -> dict[str, Any]:
+    raw_argv = [str(part) for part in task.get("argv") or []]
+    original_sandbox = infer_argv_sandbox(raw_argv)
+    actual_sandbox = infer_argv_sandbox(command)
+    info = {
+        "respect_task_argv": respect_task_argv,
+        "sandbox_profile": sandbox_profile,
+        "original_argv_sandbox": original_sandbox,
+        "actual_sandbox": actual_sandbox,
+        "sandbox_overrode_task_argv": bool(raw_argv and not respect_task_argv and original_sandbox and original_sandbox != actual_sandbox),
+    }
+    if raw_argv:
+        info["original_argv"] = command_to_text(raw_argv)
+    return info
+
+
+def infer_argv_sandbox(argv: Sequence[str]) -> str | None:
+    parts = [str(part) for part in argv]
+    if any(part == "--dangerously-bypass-approvals-and-sandbox" for part in parts):
+        return "bypass"
+    for index, part in enumerate(parts):
+        if part in {"-s", "--sandbox"} and index + 1 < len(parts):
+            return parts[index + 1]
+        if part.startswith("--sandbox="):
+            return part.split("=", 1)[1]
+    return None
 
 
 def status_run(output_root: str | Path) -> dict[str, Any]:
@@ -453,7 +552,7 @@ def kill_run(output_root: str | Path) -> dict[str, Any]:
     updated["updated_at"] = updated["finished_at"]
     _mark_unfinished_tasks(updated, task_status="killed", at=updated["finished_at"])
     _write_json_atomic(root / STATUS_FILE, updated)
-    append_jsonl(root / CHILDREN_FILE, {"event": "run_killed", "pids": killed, "target_pids": target_pids, "at": updated["finished_at"]})
+    append_jsonl_safe(root / CHILDREN_FILE, {"event": "run_killed", "pids": killed, "target_pids": target_pids, "at": updated["finished_at"]})
     _reap_background_procs(wait=True)
     wait_for_run_files_released(root, timeout_seconds=6.0)
     return updated
@@ -476,7 +575,7 @@ def cleanup_stale_run(output_root: str | Path) -> dict[str, Any]:
     updated["updated_at"] = updated["finished_at"]
     _mark_unfinished_tasks(updated, task_status="stale_cleaned", at=updated["finished_at"])
     _write_json_atomic(root / STATUS_FILE, updated)
-    append_jsonl(root / CHILDREN_FILE, {"event": "stale_cleaned", "pids": killed, "target_pids": target_pids, "at": updated["finished_at"]})
+    append_jsonl_safe(root / CHILDREN_FILE, {"event": "stale_cleaned", "pids": killed, "target_pids": target_pids, "at": updated["finished_at"]})
     _reap_background_procs(wait=True)
     wait_for_run_files_released(root, timeout_seconds=6.0)
     return updated
@@ -808,15 +907,18 @@ def _windows_process_tree_pids(pid: int) -> list[int]:
     return ordered or [pid]
 
 
-def start_stdin_writer(proc: subprocess.Popen[str], prompt_text: str) -> threading.Thread:
+def start_stdin_writer(proc: subprocess.Popen[str], prompt_text: str, stdin_status: dict[str, Any]) -> threading.Thread:
     def write_prompt() -> None:
         if proc.stdin is None:
+            stdin_status["error"] = "stdin pipe missing"
             return
         try:
             proc.stdin.write(prompt_text)
             proc.stdin.flush()
-        except (BrokenPipeError, OSError, ValueError):
-            pass
+            stdin_status["written"] = True
+            stdin_status["bytes"] = len(prompt_text.encode("utf-8"))
+        except (BrokenPipeError, OSError, ValueError) as exc:
+            stdin_status["error"] = str(exc)
         finally:
             try:
                 proc.stdin.close()
@@ -841,6 +943,148 @@ def _mark_unfinished_tasks(payload: dict[str, Any], *, task_status: str, at: str
         task["finished_at"] = at
         task["last_seen_at"] = at
     payload["totals"] = dict(Counter(str(task.get("status") or "unknown") for task in tasks if isinstance(task, Mapping)))
+
+
+def analyze_codex_events(path: Path) -> dict[str, Any]:
+    analysis: dict[str, Any] = {"failed": False, "usage": {}, "failure_events": []}
+    if not path.exists():
+        return analysis
+    for line_number, line in enumerate(path.read_text(encoding="utf-8", errors="replace").splitlines(), start=1):
+        if not line.strip():
+            continue
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(event, dict):
+            continue
+        event_type = str(event.get("type") or "")
+        if event_type == "turn.completed" and isinstance(event.get("usage"), dict):
+            analysis["usage"] = dict(event["usage"])
+        message = event_message(event)
+        lower = message.lower()
+        failed = event_type in EVENT_FAILURE_TYPES or any(word in lower for word in USAGE_FAILURE_WORDS)
+        if failed:
+            error_type = classify_failure_message(message, default="codex_event_failed")
+            failure = {"line": line_number, "type": event_type, "error_type": error_type, "message": message[:500]}
+            analysis["failure_events"].append(failure)
+            analysis["failed"] = True
+            analysis.setdefault("error_type", error_type)
+            analysis.setdefault("error_summary", failure["message"] or f"event type={event_type}")
+    if analysis.get("failed") and not analysis.get("error_summary"):
+        analysis["error_summary"] = "Codex event log reported failure"
+    return analysis
+
+
+def event_message(event: Mapping[str, Any]) -> str:
+    parts: list[str] = []
+    for key in ("message", "error", "reason"):
+        value = event.get(key)
+        if isinstance(value, str):
+            parts.append(value)
+        elif isinstance(value, Mapping):
+            nested = event_message(value)
+            if nested:
+                parts.append(nested)
+    return " ".join(part for part in parts if part)
+
+
+def analyze_process_text(stderr_path: Path, last_message_path: Path) -> dict[str, Any]:
+    text_parts: list[str] = []
+    for path in (stderr_path, last_message_path):
+        if path.exists():
+            text_parts.append(path.read_text(encoding="utf-8", errors="replace")[:2000])
+    text = "\n".join(text_parts)
+    lower = text.lower()
+    if any(word in lower for word in USAGE_FAILURE_WORDS):
+        return {"failed": True, "error_type": classify_failure_message(text, default="process_output_failed"), "error_summary": text[:500]}
+    if "policy" in lower and any(word in lower for word in POLICY_FAILURE_WORDS):
+        return {"failed": True, "error_type": "policy_denied", "error_summary": text[:500]}
+    return {"failed": False}
+
+
+def classify_failure_message(message: str, *, default: str) -> str:
+    lower = message.lower()
+    if "usage limit" in lower or "quota" in lower or "credit" in lower:
+        return "usage_limit"
+    if "rate limit" in lower:
+        return "rate_limit"
+    if "auth" in lower or "unauthorized" in lower or "forbidden" in lower:
+        return "auth_error"
+    if "policy" in lower and any(word in lower for word in POLICY_FAILURE_WORDS):
+        return "policy_denied"
+    return default
+
+
+def check_task_outputs(task: Mapping[str, Any], paths: Mapping[str, Any]) -> dict[str, Any]:
+    checks: list[dict[str, Any]] = []
+    patch_path = paths.get("patch_path")
+    if patch_path:
+        checks.append(check_expected_file(Path(str(patch_path)), label="patch", required=True, min_bytes=1, min_lines=None))
+    expected_path = paths.get("expected_output_path")
+    if expected_path:
+        checks.append(
+            check_expected_file(
+                Path(str(expected_path)),
+                label="expected_output",
+                required=True,
+                min_bytes=_optional_int(task.get("expected_min_bytes")),
+                min_lines=_optional_int(task.get("expected_line_count")),
+            )
+        )
+    failed_checks = [check for check in checks if not check.get("ok")]
+    if failed_checks:
+        first = failed_checks[0]
+        return {
+            "failed": True,
+            "error_type": str(first.get("code") or "missing_expected_output"),
+            "error_summary": str(first.get("message") or "expected output contract was not satisfied"),
+            "checks": checks,
+        }
+    return {"failed": False, "checks": checks}
+
+
+def check_expected_file(path: Path, *, label: str, required: bool, min_bytes: int | None, min_lines: int | None) -> dict[str, Any]:
+    if not path.exists():
+        return {"ok": not required, "label": label, "path": str(path), "code": "missing_expected_output", "message": f"{label} missing: {path}"}
+    size = path.stat().st_size
+    if min_bytes is not None and size < min_bytes:
+        return {
+            "ok": False,
+            "label": label,
+            "path": str(path),
+            "code": "expected_output_too_small",
+            "message": f"{label} has {size} bytes, expected at least {min_bytes}",
+            "bytes": size,
+            "expected_min_bytes": min_bytes,
+        }
+    line_count = None
+    if min_lines is not None:
+        line_count = len(path.read_text(encoding="utf-8", errors="replace").splitlines())
+        if line_count < min_lines:
+            return {
+                "ok": False,
+                "label": label,
+                "path": str(path),
+                "code": "expected_output_too_few_lines",
+                "message": f"{label} has {line_count} lines, expected at least {min_lines}",
+                "line_count": line_count,
+                "expected_line_count": min_lines,
+            }
+    result = {"ok": True, "label": label, "path": str(path), "bytes": size}
+    if line_count is not None:
+        result["line_count"] = line_count
+    return result
+
+
+def _optional_int(value: Any) -> int | None:
+    if value is None or str(value).strip() == "":
+        return None
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return None
+    return max(0, parsed)
 
 
 def usage_from_events(path: Path) -> dict[str, Any]:
@@ -888,7 +1132,7 @@ class AgentRunState:
 
     def append_result(self, result: Mapping[str, Any]) -> None:
         with self.lock:
-            append_jsonl(self.output_root / RESULTS_FILE, dict(result))
+            append_jsonl_safe(self.output_root / RESULTS_FILE, dict(result))
 
     def write(self, *, status: str) -> None:
         with self.lock:
@@ -998,9 +1242,24 @@ def _resolve_existing_or_declared_path(value: Any, cwd: Path) -> Path | None:
 
 def _write_json_atomic(path: Path, data: Mapping[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp_path = path.with_name(path.name + ".tmp")
-    tmp_path.write_text(json.dumps(dict(data), ensure_ascii=False, indent=2, sort_keys=True, default=str) + "\n", encoding="utf-8", newline="\n")
-    tmp_path.replace(path)
+    text = json.dumps(dict(data), ensure_ascii=False, indent=2, sort_keys=True, default=str) + "\n"
+    last_error: OSError | None = None
+    for attempt in range(10):
+        tmp_path = path.with_name(f"{path.name}.{os.getpid()}.{threading.get_ident()}.{uuid.uuid4().hex}.tmp")
+        try:
+            tmp_path.write_text(text, encoding="utf-8", newline="\n")
+            os.replace(tmp_path, path)
+            return
+        except OSError as exc:
+            last_error = exc
+            try:
+                if tmp_path.exists():
+                    tmp_path.unlink()
+            except OSError:
+                pass
+            time.sleep(0.02 * (attempt + 1))
+    if last_error is not None:
+        raise last_error
 
 
 def _reset_run_logs(output_root: Path, *, keep_children: bool) -> None:

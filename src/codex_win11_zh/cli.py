@@ -158,22 +158,35 @@ def cmd_run(args: argparse.Namespace) -> int:
 
 
 def cmd_agent_run_plan(args: argparse.Namespace) -> int:
-    print_json(
-        run_plan(
-            tasks_jsonl=args.tasks_jsonl,
-            output_root=args.output_root,
-            cwd=args.cwd,
-            max_workers=args.max_workers,
-            timeout_seconds=args.timeout_seconds,
-            sandbox_profile=args.sandbox_profile,
-            codex_bin=args.codex_bin,
-            background=args.background,
-            dry_run=args.dry_run,
-            respect_task_argv=args.respect_task_argv,
-            search=args.search,
+    try:
+        print_json(
+            run_plan(
+                tasks_jsonl=args.tasks_jsonl,
+                output_root=args.output_root,
+                cwd=args.cwd,
+                max_workers=args.max_workers,
+                timeout_seconds=args.timeout_seconds,
+                sandbox_profile=args.sandbox_profile,
+                codex_bin=args.codex_bin,
+                background=args.background,
+                dry_run=args.dry_run,
+                respect_task_argv=args.respect_task_argv,
+                search=args.search,
+            )
         )
-    )
-    return 0
+        return 0
+    except KeyboardInterrupt:
+        output_root = Path(args.output_root)
+        print_json(
+            {
+                "ok": False,
+                "status": "cancelled",
+                "output_root": str(output_root),
+                "status_path": str(output_root / "status.json"),
+                "results_path": str(output_root / "results.jsonl"),
+            }
+        )
+        return 130
 
 
 def cmd_agent_status(args: argparse.Namespace) -> int:

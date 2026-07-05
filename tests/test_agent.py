@@ -57,16 +57,20 @@ if "SLEEP" in prompt or "timeout" in task_code:
 if last_message:
     last_message.write_text(json.dumps({"ok": True, "chars": len(prompt)}, ensure_ascii=False), encoding="utf-8")
 
-if "PATCH_PATH=" in prompt:
+if "NO_PATCH" not in prompt and "PATCH_PATH=" in prompt:
     patch_path = pathlib.Path(prompt.split("PATCH_PATH=", 1)[1].splitlines()[0])
     patch_path.parent.mkdir(parents=True, exist_ok=True)
     patch_path.write_text(json.dumps({"kind": "fake_patch"}, ensure_ascii=False) + "\n", encoding="utf-8")
-elif task_code and "fail" not in task_code and "timeout" not in task_code and "bad_json" not in task_code:
+elif "NO_PATCH" not in prompt and task_code and "fail" not in task_code and "timeout" not in task_code and "bad_json" not in task_code:
     patch_path = last_message.parent.parent / "patches" / f"{task_code}.jsonl"
     patch_path.parent.mkdir(parents=True, exist_ok=True)
     patch_path.write_text(json.dumps({"kind": "fake_patch"}, ensure_ascii=False) + "\n", encoding="utf-8")
 
-if "BADJSON" in prompt or "bad_json" in task_code:
+if "TURN_BROKEN" in prompt:
+    print(json.dumps({"type": "turn.failed", "message": "You've hit your usage limit. Please try again later."}))
+elif "USAGE_ERROR" in prompt:
+    print(json.dumps({"type": "error", "message": "rate limit exceeded"}))
+elif "BADJSON" in prompt or "bad_json" in task_code:
     print("not-json")
 else:
     print(json.dumps({"type": "turn.completed", "usage": {"input_tokens": 2, "output_tokens": 3}}))
@@ -182,7 +186,8 @@ class AgentCliTests(unittest.TestCase):
             results = {row["task_code"]: row for row in read_jsonl(output_root / "results.jsonl")}
             self.assertEqual("failed", results["fail_task"]["status"])
             self.assertEqual("timed_out", results["timeout_task"]["status"])
-            self.assertEqual("succeeded", results["bad_json_task"]["status"])
+            self.assertEqual("failed", results["bad_json_task"]["status"])
+            self.assertEqual("missing_expected_output", results["bad_json_task"]["error_type"])
 
             collect_rc = main(["agent", "collect", "--output-root", str(output_root)])
 
@@ -190,6 +195,102 @@ class AgentCliTests(unittest.TestCase):
             summary = json.loads((output_root / "summary.json").read_text(encoding="utf-8"))
             self.assertFalse(summary["ok"])
             self.assertIn("invalid_jsonl", {issue["code"] for issue in summary["issues"]})
+
+    def test_turn_failed_event_marks_task_failed_even_with_zero_returncode(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            fake = make_fake_codex(root)
+            tasks_jsonl = write_tasks(root, [make_task(root, "event_limit_task", "PATCH_PATH=patches/event_limit_task.jsonl\nTURN_BROKEN\n")])
+            output_root = root / "agent_run"
+
+            rc = main(
+                [
+                    "agent",
+                    "run-plan",
+                    "--tasks-jsonl",
+                    str(tasks_jsonl),
+                    "--output-root",
+                    str(output_root),
+                    "--cwd",
+                    str(root),
+                    "--codex-bin",
+                    str(fake),
+                    "--timeout-seconds",
+                    "5",
+                ]
+            )
+
+            self.assertEqual(0, rc)
+            status = json.loads((output_root / "status.json").read_text(encoding="utf-8"))
+            self.assertEqual("failed", status["status"])
+            results = read_jsonl(output_root / "results.jsonl")
+            self.assertEqual("failed", results[0]["status"])
+            self.assertEqual(0, results[0]["returncode"])
+            self.assertEqual("usage_limit", results[0]["error_type"])
+            self.assertTrue(results[0]["event_analysis"]["failed"])
+
+    def test_missing_declared_patch_marks_task_failed(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            fake = make_fake_codex(root)
+            tasks_jsonl = write_tasks(root, [make_task(root, "missing_patch_task", "NO_PATCH\n")])
+            output_root = root / "agent_run"
+
+            rc = main(
+                [
+                    "agent",
+                    "run-plan",
+                    "--tasks-jsonl",
+                    str(tasks_jsonl),
+                    "--output-root",
+                    str(output_root),
+                    "--cwd",
+                    str(root),
+                    "--codex-bin",
+                    str(fake),
+                    "--timeout-seconds",
+                    "5",
+                ]
+            )
+
+            self.assertEqual(0, rc)
+            results = read_jsonl(output_root / "results.jsonl")
+            self.assertEqual("failed", results[0]["status"])
+            self.assertEqual("missing_expected_output", results[0]["error_type"])
+            self.assertFalse((root / "patches" / "missing_patch_task.jsonl").exists())
+
+    def test_expected_output_path_contract_marks_task_failed(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            fake = make_fake_codex(root)
+            task = make_task(root, "expected_output_task", "PATCH_PATH=patches/expected_output_task.jsonl\n")
+            task["expected_output_path"] = "reports/expected.jsonl"
+            task["expected_min_bytes"] = 5
+            tasks_jsonl = write_tasks(root, [task])
+            output_root = root / "agent_run"
+
+            rc = main(
+                [
+                    "agent",
+                    "run-plan",
+                    "--tasks-jsonl",
+                    str(tasks_jsonl),
+                    "--output-root",
+                    str(output_root),
+                    "--cwd",
+                    str(root),
+                    "--codex-bin",
+                    str(fake),
+                    "--timeout-seconds",
+                    "5",
+                ]
+            )
+
+            self.assertEqual(0, rc)
+            results = read_jsonl(output_root / "results.jsonl")
+            self.assertEqual("failed", results[0]["status"])
+            self.assertEqual("missing_expected_output", results[0]["error_type"])
+            self.assertEqual("expected_output", results[0]["output_analysis"]["checks"][1]["label"])
 
     def test_background_run_can_be_waited(self) -> None:
         with tempfile.TemporaryDirectory() as td:
@@ -223,6 +324,39 @@ class AgentCliTests(unittest.TestCase):
             self.assertEqual("succeeded", status["status"])
             last_message = json.loads((root / "logs" / "task_bg.last.md").read_text(encoding="utf-8"))
             self.assertGreater(last_message["chars"], 0)
+
+    def test_parallel_status_writes_do_not_share_temp_path(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            fake = make_fake_codex(root)
+            tasks = [make_task(root, f"parallel_{index}", f"PATCH_PATH=patches/parallel_{index}.jsonl\n") for index in range(12)]
+            tasks_jsonl = write_tasks(root, tasks)
+            output_root = root / "agent_run"
+
+            rc = main(
+                [
+                    "agent",
+                    "run-plan",
+                    "--tasks-jsonl",
+                    str(tasks_jsonl),
+                    "--output-root",
+                    str(output_root),
+                    "--cwd",
+                    str(root),
+                    "--codex-bin",
+                    str(fake),
+                    "--max-workers",
+                    "4",
+                    "--timeout-seconds",
+                    "10",
+                ]
+            )
+
+            self.assertEqual(0, rc)
+            status = json.loads((output_root / "status.json").read_text(encoding="utf-8"))
+            self.assertEqual("succeeded", status["status"])
+            self.assertEqual({"succeeded": 12}, status["totals"])
+            self.assertFalse(list(output_root.glob("status.json.*.tmp")))
 
     def test_background_kill_stops_running_supervisor_and_task(self) -> None:
         with tempfile.TemporaryDirectory() as td:
@@ -394,6 +528,10 @@ class AgentCliTests(unittest.TestCase):
             self.assertEqual(0, rc)
             status = json.loads((output_root / "status.json").read_text(encoding="utf-8"))
             self.assertEqual("succeeded", status["status"])
+            results = read_jsonl(output_root / "results.jsonl")
+            self.assertGreater(results[0]["prompt_bytes"], 0)
+            self.assertTrue(results[0]["stdin"]["written"])
+            self.assertEqual("read-only", results[0]["command_info"]["actual_sandbox"])
             last_message = json.loads((root / "logs" / "relative_bin_task.last.md").read_text(encoding="utf-8"))
             self.assertGreater(last_message["chars"], 0)
 
@@ -425,6 +563,10 @@ class AgentCliTests(unittest.TestCase):
             self.assertEqual(0, rc)
             status = json.loads((output_root / "status.json").read_text(encoding="utf-8"))
             self.assertEqual("succeeded", status["status"])
+            results = read_jsonl(output_root / "results.jsonl")
+            self.assertGreater(results[0]["prompt_bytes"], 0)
+            self.assertTrue(results[0]["stdin"]["written"])
+            self.assertTrue(results[0]["command_info"]["respect_task_argv"])
             last_message = json.loads((root / "logs" / "respect_relative_task.last.md").read_text(encoding="utf-8"))
             self.assertGreater(last_message["chars"], 0)
 
