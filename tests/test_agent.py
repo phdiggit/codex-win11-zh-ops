@@ -179,6 +179,10 @@ class AgentCliTests(unittest.TestCase):
             results = read_jsonl(output_root / "results.jsonl")
             self.assertEqual(["succeeded", "succeeded"], [row["status"] for row in results])
             self.assertEqual({"input_tokens": 2, "output_tokens": 3}, results[0]["usage"])
+            self.assertEqual(2, results[0]["input_tokens"])
+            self.assertEqual(3, results[0]["output_tokens"])
+            self.assertEqual(1, results[0]["output_rows"])
+            self.assertFalse(results[0]["recovered"])
             last_message = json.loads((root / "logs" / "task_a.last.md").read_text(encoding="utf-8"))
             self.assertGreater(last_message["chars"], 0)
 
@@ -188,6 +192,9 @@ class AgentCliTests(unittest.TestCase):
             summary = json.loads((output_root / "summary.json").read_text(encoding="utf-8"))
             self.assertTrue(summary["ok"])
             self.assertEqual(2, summary["totals"]["tasks"])
+            self.assertEqual("task_a", summary["task_summary"][0]["task_code"])
+            self.assertEqual(1, summary["task_summary"][0]["rows"])
+            self.assertEqual(2, summary["task_summary"][0]["input_tokens"])
 
     def test_run_plan_rejects_duplicate_task_codes(self) -> None:
         with tempfile.TemporaryDirectory() as td:
@@ -478,6 +485,9 @@ class AgentCliTests(unittest.TestCase):
             self.assertEqual("succeeded", results[0]["status"])
             self.assertTrue(results[0]["process_analysis"]["downgraded_by_deny_policy"])
             self.assertTrue(results[0]["permission_analysis"]["downgraded_by_deny_policy"])
+            self.assertTrue(results[0]["permission_analysis"]["risk_observed"])
+            self.assertEqual("warning", results[0]["permission_analysis"]["events"][0]["severity"])
+            self.assertEqual("error", results[0]["permission_analysis"]["events"][0]["original_severity"])
             self.assertEqual("rewrite_to_last_message", results[0]["deny_resolution"]["action"])
             self.assertIn("git", results[0]["permission_analysis"]["denied_command_mentions"])
             patch_rows = read_jsonl(root / "tmp" / "patches" / "policy_recovery_task.jsonl")
@@ -519,6 +529,42 @@ class AgentCliTests(unittest.TestCase):
             self.assertTrue(results[0]["permission_analysis"]["downgraded_by_deny_policy"])
             self.assertEqual("continue", results[0]["deny_resolution"]["action"])
             self.assertFalse(results[0]["output_analysis"]["failed"])
+
+    def test_agent_preset_retrieval_jsonl_applies_common_defaults(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            fake = make_fake_codex(root)
+            task = make_task(root, "preset_task", "PATCH_PATH=tmp/patches/preset_task.jsonl\n")
+            task["patch_path"] = "tmp/patches/preset_task.jsonl"
+            tasks_jsonl = write_tasks(root, [task])
+            output_root = root / "agent_run"
+
+            rc = main(
+                [
+                    "agent",
+                    "run-plan",
+                    "--tasks-jsonl",
+                    str(tasks_jsonl),
+                    "--output-root",
+                    str(output_root),
+                    "--cwd",
+                    str(root),
+                    "--codex-bin",
+                    str(fake),
+                    "--agent-preset",
+                    "retrieval-jsonl",
+                    "--timeout-seconds",
+                    "5",
+                ]
+            )
+
+            self.assertEqual(0, rc)
+            results = read_jsonl(output_root / "results.jsonl")
+            self.assertEqual("succeeded", results[0]["status"])
+            self.assertEqual("tmp-jsonl-review", results[0]["permission"]["profile"])
+            self.assertEqual("deny-rewrite", results[0]["permission"]["deny_policy"])
+            self.assertEqual("none", results[0]["permission"]["git_snapshot"])
+            self.assertEqual([], results[0]["permission"]["readonly_equivalents"])
 
     def test_deny_rewrite_requires_last_message_recovery(self) -> None:
         with tempfile.TemporaryDirectory() as td:

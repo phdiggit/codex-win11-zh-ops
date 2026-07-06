@@ -11,12 +11,12 @@ codex-win agent run-plan `
   --tasks-jsonl tmp\codex_tasks.jsonl `
   --output-root tmp\agent_run `
   --cwd . `
-  --permission-profile tmp-jsonl-review `
-  --deny-policy deny-rewrite `
-  --git-snapshot minimal `
+  --agent-preset retrieval-jsonl `
   --max-workers 4 `
   --timeout-seconds 1800
 ```
+
+`retrieval-jsonl` / `factorization-jsonl` preset 会展开成 `tmp-jsonl-review + deny-rewrite + git-snapshot none`。需要 git 摘要时可显式加 `--git-snapshot minimal` 或 `--git-snapshot full` 覆盖 preset。
 
 后台模式可加 `--background`，再用 `status`、`wait`、`collect`、`kill`、`cleanup-stale` 收尾：
 
@@ -116,6 +116,8 @@ logs/*           默认 stdout/event log、stderr 和 last message
 ```
 
 任务成功不只看进程退出码。若 JSON event log 出现 `type=error`、`turn.failed`、usage/rate/auth limit，或产物契约不满足，任务会标为 failed，并在 `results.jsonl` 写入 `error_type`、`error`、`event_analysis`。
+
+为了减少主控二次统计，`results.jsonl` 会平铺 `duration_sec`、`input_tokens`、`output_tokens`、`output_rows`、`recovered`。`collect` 会在 `summary.json.task_summary` 中输出一张每任务摘要表：`task_code/status/duration_sec/input_tokens/output_tokens/rows/recovered/error_type`。
 
 ## 接入边界
 

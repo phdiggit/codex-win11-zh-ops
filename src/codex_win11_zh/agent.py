@@ -33,6 +33,10 @@ SANDBOX_PROFILES = {"read-only", "local-write", "bypass"}
 PERMISSION_PROFILES = {"review-only", "tmp-jsonl-review", "local-write", "repo-editor", "bypass"}
 DENY_POLICIES = {"fail", "continue-with-final", "deny-fail", "deny-continue", "deny-rewrite"}
 GIT_SNAPSHOT_MODES = {"none", "minimal", "full"}
+AGENT_PRESETS = {
+    "retrieval-jsonl": {"permission_profile": "tmp-jsonl-review", "deny_policy": "deny-rewrite", "git_snapshot": "none"},
+    "factorization-jsonl": {"permission_profile": "tmp-jsonl-review", "deny_policy": "deny-rewrite", "git_snapshot": "none"},
+}
 DENY_POLICY_ALIASES = {
     "fail": "deny-fail",
     "deny_fail": "deny-fail",
@@ -156,11 +160,16 @@ def run_plan(
     search: bool = False,
     heartbeat_seconds: float = 1.0,
     permission_profile: str | None = None,
-    deny_policy: str = "fail",
+    deny_policy: str | None = None,
     write_roots: Sequence[str | Path] = (),
-    git_snapshot: str = "minimal",
+    git_snapshot: str | None = None,
+    agent_preset: str | None = None,
 ) -> dict[str, Any]:
-    git_snapshot_mode = normalize_git_snapshot_mode(git_snapshot)
+    preset = resolve_agent_preset(agent_preset)
+    resolved_permission_profile = permission_profile if permission_profile is not None else _optional_str(preset.get("permission_profile"))
+    resolved_deny_policy = deny_policy if deny_policy is not None else str(preset.get("deny_policy") or "fail")
+    resolved_git_snapshot = git_snapshot if git_snapshot is not None else str(preset.get("git_snapshot") or "minimal")
+    git_snapshot_mode = normalize_git_snapshot_mode(resolved_git_snapshot)
     config = {
         "tasks_jsonl": str(Path(tasks_jsonl)),
         "output_root": str(Path(output_root)),
@@ -173,10 +182,11 @@ def run_plan(
         "respect_task_argv": bool(respect_task_argv),
         "search": bool(search),
         "heartbeat_seconds": float(heartbeat_seconds),
-        "permission_profile": permission_profile,
-        "deny_policy": deny_policy,
+        "permission_profile": resolved_permission_profile,
+        "deny_policy": resolved_deny_policy,
         "write_roots": [str(Path(path)) for path in write_roots],
         "git_snapshot": git_snapshot_mode,
+        "agent_preset": agent_preset,
     }
     if background and not dry_run:
         return start_background_run(config)
@@ -472,6 +482,15 @@ def normalize_git_snapshot_mode(value: Any) -> str:
     return mode
 
 
+def resolve_agent_preset(value: str | None) -> dict[str, str]:
+    if value is None or not str(value).strip():
+        return {}
+    preset = str(value).strip()
+    if preset not in AGENT_PRESETS:
+        raise AgentRunError(f"unsupported agent preset: {preset}")
+    return dict(AGENT_PRESETS[preset])
+
+
 def build_context_snapshot(cwd: Path, *, mode: str) -> dict[str, Any]:
     normalized_mode = normalize_git_snapshot_mode(mode)
     if normalized_mode == "none":
@@ -736,6 +755,7 @@ def run_one_task(
     )
     process_analysis = deny_resolution["process_analysis"]
     permission_analysis = deny_resolution["permission_analysis"]
+    result_metrics = summarize_result_metrics(event_analysis.get("usage", {}), output_analysis)
     status = "timed_out" if timed_out else ("succeeded" if int(returncode) == 0 else "failed")
     failure: dict[str, Any] | None = None
     if timed_out:
@@ -769,6 +789,7 @@ def run_one_task(
         "command_info": command_info,
         "permission": permission,
         "usage": event_analysis.get("usage", {}),
+        **result_metrics,
         "event_analysis": event_analysis,
         "output_analysis": output_analysis,
         "process_analysis": process_analysis,
@@ -1292,11 +1313,91 @@ def collect_run(output_root: str | Path) -> dict[str, Any]:
             "results": len(results),
             **dict(Counter(str(row.get("status") or "unknown") for row in results)),
         },
+        "task_summary": build_task_summary(results, tasks=tasks),
         "issues": issues,
         "ok": not any(issue.get("severity") == "error" for issue in issues),
     }
     write_json_utf8(root / SUMMARY_FILE, summary, sort_keys=True)
     return summary
+
+
+def build_task_summary(results: Sequence[Mapping[str, Any]], *, tasks: Sequence[Mapping[str, Any]] = ()) -> list[dict[str, Any]]:
+    result_rows = [dict(result) for result in results]
+    if tasks:
+        order = {str(task.get("task_code") or ""): index for index, task in enumerate(tasks)}
+        result_rows.sort(key=lambda row: (order.get(str(row.get("task_code") or ""), len(order)), str(row.get("task_code") or "")))
+    rows: list[dict[str, Any]] = []
+    for result in result_rows:
+        rows.append(
+            {
+                "task_code": str(result.get("task_code") or ""),
+                "status": str(result.get("status") or "unknown"),
+                "duration_sec": result.get("duration_sec"),
+                "input_tokens": result.get("input_tokens"),
+                "output_tokens": result.get("output_tokens"),
+                "rows": result.get("output_rows"),
+                "recovered": bool(result.get("recovered")),
+                "error_type": result.get("error_type"),
+            }
+        )
+    return rows
+
+
+def summarize_result_metrics(usage: Mapping[str, Any], output_analysis: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "input_tokens": token_value(usage, "input_tokens", "prompt_tokens"),
+        "output_tokens": token_value(usage, "output_tokens", "completion_tokens"),
+        "output_rows": count_output_rows(output_analysis),
+        "recovered": output_has_recovery(output_analysis),
+    }
+
+
+def token_value(usage: Mapping[str, Any], *keys: str) -> int | None:
+    for key in keys:
+        value = usage.get(key)
+        if isinstance(value, int):
+            return value
+        if isinstance(value, float):
+            return int(value)
+        if isinstance(value, str) and value.strip().isdigit():
+            return int(value)
+    return None
+
+
+def count_output_rows(output_analysis: Mapping[str, Any]) -> int | None:
+    paths: set[str] = set()
+    rows = 0
+    found = False
+    for check in output_analysis.get("checks") or []:
+        if not isinstance(check, Mapping) or not check.get("ok"):
+            continue
+        path = str(check.get("path") or "")
+        if not path or path in paths:
+            continue
+        paths.add(path)
+        if isinstance(check.get("line_count"), int):
+            rows += int(check["line_count"])
+            found = True
+            continue
+        counted = count_nonempty_lines(Path(path))
+        if counted is not None:
+            rows += counted
+            found = True
+    if not found:
+        for recovery in output_analysis.get("recoveries") or []:
+            if isinstance(recovery, Mapping) and recovery.get("ok") and isinstance(recovery.get("rows"), int):
+                rows += int(recovery["rows"])
+                found = True
+    return rows if found else None
+
+
+def count_nonempty_lines(path: Path) -> int | None:
+    try:
+        if not path.exists():
+            return None
+        return sum(1 for line in path.read_text(encoding="utf-8", errors="replace").splitlines() if line.strip())
+    except OSError:
+        return None
 
 
 def active_pids(output_root: Path, status: Mapping[str, Any]) -> list[int]:
@@ -1716,11 +1817,27 @@ def resolve_deny_policy(
         if permission_failed:
             perm["failed"] = False
             perm["downgraded_by_deny_policy"] = True
+            perm["risk_observed"] = True
+            perm["events"] = downgrade_permission_events(perm.get("events") or [])
     return {"process_analysis": process, "permission_analysis": perm, "resolution": resolution}
 
 
 def output_has_recovery(output_analysis: Mapping[str, Any]) -> bool:
     return any(bool(recovery.get("ok")) for recovery in output_analysis.get("recoveries") or [] if isinstance(recovery, Mapping))
+
+
+def downgrade_permission_events(events: Sequence[Any]) -> list[dict[str, Any]]:
+    downgraded: list[dict[str, Any]] = []
+    for event in events:
+        if not isinstance(event, Mapping):
+            continue
+        row = dict(event)
+        if row.get("severity") == "error":
+            row["original_severity"] = "error"
+            row["severity"] = "warning"
+            row["downgraded_by_deny_policy"] = True
+        downgraded.append(row)
+    return downgraded
 
 
 def analyze_permission_output(task: Mapping[str, Any], *paths: Path) -> dict[str, Any]:

@@ -57,13 +57,13 @@
 ## 子 Agent 与批量任务
 
 1. 需要批量启动、后台托管或并发运行 Codex 子任务时，优先使用 `codex-win agent run-plan`；它只负责 Codex CLI 进程监管、权限画像、通用输出契约和结果收集，不替代本项目的业务 schema、readiness、dry-run、幂等校验或落库逻辑。
-2. 项目应在任务卡、脚本或本 `AGENTS.md` 中声明默认 `permission_profile`、允许写入目录、`deny_policy` 和 `expected_outputs`。未声明项目特殊规则时，patch/review 类任务默认使用 `--permission-profile tmp-jsonl-review --deny-policy deny-rewrite`，只允许写 `tmp/**` 下的 patch、log、report。
+2. 项目应在任务卡、脚本或本 `AGENTS.md` 中声明默认 `permission_profile`、允许写入目录、`deny_policy` 和 `expected_outputs`。未声明项目特殊规则时，patch/review 类任务默认使用 `--agent-preset retrieval-jsonl`，等价于 `tmp-jsonl-review + deny-rewrite + git-snapshot none`，只允许写 `tmp/**` 下的 patch、log、report。
 3. 子任务 prompt、workitems、patch 和 last message 一律通过 UTF-8 文件传递，不通过 PowerShell inline、管道或 here-string 传递中文、多行 JSON 或 Markdown。
 4. `codex_tasks.jsonl` 中建议每个 task 声明 `task_code`、`prompt_path`、`patch_path`、`last_message_path`、`log_path` 和 `expected_outputs`；JSONL patch 可使用 `PATCH_JSONL_BEGIN` / `PATCH_JSONL_END` 作为 last-message fallback 标记。
 5. 若子 agent 尝试越权命令或被策略拒绝，不要把“进程退出码为 0”视为成功；以 `results.jsonl` 中的 `status`、`error_type`、`permission_analysis`、`deny_resolution`、`output_analysis` 和项目 readiness 为准。
-6. 默认使用 `--git-snapshot minimal`，只给子 agent 少量 git 摘要；只有任务明确需要 diff stat/name-status 时才用 `--git-snapshot full`，完全不需要 git 上下文时用 `--git-snapshot none`。
+6. 默认不向 JSONL patch 子任务注入 git 上下文；只有任务明确需要少量 git 摘要时才用 `--git-snapshot minimal`，需要 diff stat/name-status 时才用 `--git-snapshot full`。
 7. 只有任务卡明确要求可写源码时才使用 `repo-editor`；只有用户明确点名并接受风险时才使用 `bypass`。使用更高权限 profile 时，仍必须声明输出契约和收尾验证。
-8. 后台 run 必须用 `status`、`wait`、`collect` 收尾；异常中断后先用 `cleanup-stale` 清理残留进程，再读取 `summary.json` / `results.jsonl` 判断是否可恢复。
+8. 后台 run 必须用 `status`、`wait`、`collect` 收尾；异常中断后先用 `cleanup-stale` 清理残留进程，再读取 `summary.json` / `results.jsonl` 判断是否可恢复。需要汇总时优先读取 `summary.json.task_summary` 或 `results.jsonl` 中的 `duration_sec/input_tokens/output_rows/recovered`。
 
 ## GitHub、Commit 与 PR
 

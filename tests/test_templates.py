@@ -77,13 +77,15 @@ class TemplateTests(unittest.TestCase):
         self.assertIn("不静默降级", text)
         self.assertIn("## 子 Agent 与批量任务", text)
         self.assertIn("codex-win agent run-plan", text)
-        self.assertIn("--permission-profile tmp-jsonl-review --deny-policy deny-rewrite", text)
+        self.assertIn("--agent-preset retrieval-jsonl", text)
+        self.assertIn("tmp-jsonl-review + deny-rewrite + git-snapshot none", text)
         self.assertIn("expected_outputs", text)
         self.assertIn("PATCH_JSONL_BEGIN", text)
         self.assertIn("permission_analysis", text)
         self.assertIn("--git-snapshot minimal", text)
         self.assertIn("--git-snapshot full", text)
-        self.assertIn("--git-snapshot none", text)
+        self.assertIn("summary.json.task_summary", text)
+        self.assertIn("duration_sec/input_tokens/output_rows/recovered", text)
         self.assertIn("cleanup-stale", text)
 
     def test_workflow_documents_install_edge_cases(self) -> None:

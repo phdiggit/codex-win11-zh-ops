@@ -168,6 +168,8 @@ codex-win agent run-plan `
 
 首版内置 `review-only`、`tmp-jsonl-review`、`local-write`、`repo-editor`、`bypass`。`permission_profile` 会写入任务快照和 `results.jsonl`，并映射到有效 sandbox、额外可写目录、允许/禁止命令提示、能力位和 prompt 前置权限边界。即使使用 `--respect-task-argv`，声明了 profile 的任务也会按 profile 约束 `codex exec` 的 sandbox；例如 `tmp-jsonl-review` 不会允许原 argv 里的 bypass 继续生效。任务 JSON 可以覆盖全局值：`permission_profile`、`deny_policy`、`allowed_write_paths`、`allowed_commands`、`denied_commands`。这不是完整命令拦截器；首版通过 Codex sandbox、prompt 边界、产物契约和结果分析兜住长任务风险。
 
+常用组合可用 preset 简化：`--agent-preset retrieval-jsonl` 或 `--agent-preset factorization-jsonl` 等价于默认采用 `tmp-jsonl-review + deny-rewrite + git-snapshot none`，适合只需要 JSONL patch 产物、不需要 git 上下文的批量任务。显式传入的 `--permission-profile`、`--deny-policy`、`--git-snapshot` 会覆盖 preset 默认值。
+
 任务可以声明通用输出契约：
 
 ```json
@@ -208,6 +210,8 @@ results.jsonl    每个 task 的退出码、耗时、timeout、usage、prompt/st
 summary.json     collect 或最终状态摘要
 logs/*           默认 task stdout/event log、stderr 和 last message；若任务指定 log_path/last_message_path 则写到任务指定位置
 ```
+
+`results.jsonl` 会额外平铺 `duration_sec`、`input_tokens`、`output_tokens`、`output_rows`、`recovered`，方便上游快速统计。`collect` 写出的 `summary.json` 也包含 `task_summary` 表，按 task 列出 `task_code/status/duration_sec/input_tokens/output_tokens/rows/recovered/error_type`。
 
 常用收尾命令：
 
