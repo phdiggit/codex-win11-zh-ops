@@ -54,6 +54,11 @@ elif "spawn_child" in task_code:
 if "SLEEP" in prompt or "timeout" in task_code:
     time.sleep(5)
 
+if "DUMP_PROMPT_PATH=" in prompt:
+    dump_path = pathlib.Path(prompt.split("DUMP_PROMPT_PATH=", 1)[1].splitlines()[0])
+    dump_path.parent.mkdir(parents=True, exist_ok=True)
+    dump_path.write_text(prompt, encoding="utf-8")
+
 if "MENTION_DENIED_GIT" in prompt:
     print("attempted command: git status", file=sys.stderr)
 if "MENTION_GIT_RESET" in prompt:
@@ -529,6 +534,52 @@ class AgentCliTests(unittest.TestCase):
             self.assertTrue(results[0]["permission_analysis"]["failed"])
             self.assertIn("git", results[0]["permission_analysis"]["denied_command_mentions"])
             self.assertFalse(results[0]["output_analysis"]["failed"])
+
+    def test_permission_profile_injects_git_status_readonly_equivalent(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            subprocess.run(["git", "init"], cwd=root, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            (root / "visible.txt").write_text("visible\n", encoding="utf-8")
+            fake = make_fake_codex(root)
+            task = make_task(
+                root,
+                "readonly_equivalent_task",
+                "DUMP_PROMPT_PATH=tmp/prompt_dump.md\nPATCH_PATH=tmp/patches/readonly_equivalent_task.jsonl\n",
+            )
+            task["patch_path"] = "tmp/patches/readonly_equivalent_task.jsonl"
+            tasks_jsonl = write_tasks(root, [task])
+            output_root = root / "agent_run"
+
+            rc = main(
+                [
+                    "agent",
+                    "run-plan",
+                    "--tasks-jsonl",
+                    str(tasks_jsonl),
+                    "--output-root",
+                    str(output_root),
+                    "--cwd",
+                    str(root),
+                    "--codex-bin",
+                    str(fake),
+                    "--permission-profile",
+                    "tmp-jsonl-review",
+                    "--timeout-seconds",
+                    "5",
+                ]
+            )
+
+            self.assertEqual(0, rc)
+            results = read_jsonl(output_root / "results.jsonl")
+            self.assertEqual("succeeded", results[0]["status"])
+            equivalents = results[0]["permission"]["readonly_equivalents"]
+            self.assertEqual("git status", equivalents[0]["command"])
+            self.assertEqual("available", equivalents[0]["status"])
+            dump = (root / "tmp" / "prompt_dump.md").read_text(encoding="utf-8")
+            self.assertIn("readonly_equivalents:", dump)
+            self.assertIn("git_status_snapshot:", dump)
+            self.assertIn("?? visible.txt", dump)
+            self.assertIn("Use readonly_equivalents instead of running denied commands.", dump)
 
     def test_permission_profile_constrains_respected_bypass_argv(self) -> None:
         with tempfile.TemporaryDirectory() as td:

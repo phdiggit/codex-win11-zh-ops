@@ -313,6 +313,7 @@ def normalize_tasks(
 ) -> list[dict[str, Any]]:
     normalized: list[dict[str, Any]] = []
     seen: set[str] = set()
+    context_snapshot = build_context_snapshot(cwd)
     for index, task in enumerate(tasks, start=1):
         if not isinstance(task, Mapping):
             raise AgentRunError(f"task #{index} is not an object")
@@ -350,6 +351,7 @@ def normalize_tasks(
             permission_profile=permission_profile,
             deny_policy=deny_policy,
             write_roots=write_roots,
+            context_snapshot=context_snapshot,
         )
         normalized.append(row)
     return normalized
@@ -386,6 +388,7 @@ def build_permission_record(
     permission_profile: str | None,
     deny_policy: str,
     write_roots: Sequence[str],
+    context_snapshot: Mapping[str, Any],
 ) -> dict[str, Any]:
     profile = _optional_str(task.get("permission_profile")) or permission_profile
     if profile is not None and profile not in PERMISSION_PROFILES:
@@ -400,6 +403,12 @@ def build_permission_record(
     allowed_write_dirs.extend(resolve_path_list(write_roots, cwd=cwd))
     allowed_write_dirs.extend(resolve_path_list(_string_list(task.get("allowed_write_paths")), cwd=cwd))
     deduped_write_dirs = list(dict.fromkeys(str(path) for path in allowed_write_dirs))
+    readonly_equivalents = build_readonly_equivalents(
+        profile=profile,
+        denied_commands=denied_commands,
+        capabilities=capabilities,
+        context_snapshot=context_snapshot,
+    )
     return {
         "profile": profile,
         "deny_policy": task_deny_policy,
@@ -408,6 +417,7 @@ def build_permission_record(
         "allowed_commands": list(dict.fromkeys(command for command in allowed_commands if command)),
         "denied_commands": list(dict.fromkeys(command for command in denied_commands if command)),
         "capabilities": capabilities,
+        "readonly_equivalents": readonly_equivalents,
     }
 
 
@@ -428,6 +438,65 @@ def resolve_path_list(values: Sequence[str], *, cwd: Path) -> list[Path]:
         path = Path(text)
         resolved.append(path if path.is_absolute() else (cwd / path))
     return resolved
+
+
+def build_context_snapshot(cwd: Path) -> dict[str, Any]:
+    return {
+        "git_status": collect_git_status_snapshot(cwd),
+    }
+
+
+def collect_git_status_snapshot(cwd: Path) -> dict[str, Any]:
+    command = ["git", "-c", "core.quotepath=false", "status", "--short", "--branch"]
+    try:
+        completed = subprocess.run(
+            command,
+            cwd=str(cwd),
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=3,
+            env=build_runtime_env(),
+            **subprocess_startup_kwargs(detached=False),
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return {"ok": False, "command": command_to_text(command), "error": str(exc)[:500]}
+    stdout_lines = [line for line in completed.stdout.splitlines() if line.strip()]
+    return {
+        "ok": completed.returncode == 0,
+        "command": command_to_text(command),
+        "returncode": completed.returncode,
+        "stdout_lines": stdout_lines[:80],
+        "stderr": completed.stderr.strip()[:1000],
+        "truncated": len(stdout_lines) > 80,
+    }
+
+
+def build_readonly_equivalents(
+    *,
+    profile: str | None,
+    denied_commands: Sequence[str],
+    capabilities: Mapping[str, Any],
+    context_snapshot: Mapping[str, Any],
+) -> list[dict[str, Any]]:
+    equivalents: list[dict[str, Any]] = []
+    if not profile:
+        return equivalents
+    denied_git = any(str(command).strip().lower() in {"git", "git status"} for command in denied_commands)
+    if denied_git and not bool(capabilities.get("git_read")):
+        git_status = context_snapshot.get("git_status") if isinstance(context_snapshot.get("git_status"), Mapping) else {"ok": False}
+        equivalents.append(
+            {
+                "command": "git status",
+                "replacement": "git_status_snapshot",
+                "source": "supervisor",
+                "status": "available" if git_status.get("ok") else "unavailable",
+                "snapshot": dict(git_status),
+            }
+        )
+    return equivalents
 
 
 def normalize_deny_policy(value: Any) -> str:
@@ -734,7 +803,7 @@ def task_permission(task: Mapping[str, Any]) -> dict[str, Any]:
     return (
         dict(permission)
         if isinstance(permission, Mapping)
-        else {"profile": None, "deny_policy": "fail", "allowed_write_dirs": [], "allowed_commands": [], "denied_commands": [], "capabilities": {}}
+        else {"profile": None, "deny_policy": "fail", "allowed_write_dirs": [], "allowed_commands": [], "denied_commands": [], "capabilities": {}, "readonly_equivalents": []}
     )
 
 
@@ -809,6 +878,15 @@ def inject_permission_prelude(prompt_text: str, *, task: Mapping[str, Any], cwd:
         lines.append("- denied_commands:")
         lines.extend(f"  - {command}" for command in denied)
         lines.append("- If a denied command would be useful, do not run it. Continue by producing the declared output.")
+    readonly_equivalents = [item for item in permission.get("readonly_equivalents") or [] if isinstance(item, Mapping)]
+    if readonly_equivalents:
+        lines.append("- readonly_equivalents:")
+        for item in readonly_equivalents:
+            lines.append(f"  - {item.get('command')} => {item.get('replacement')} ({item.get('status')})")
+        lines.append("- Use readonly_equivalents instead of running denied commands.")
+        git_status = next((item.get("snapshot") for item in readonly_equivalents if item.get("replacement") == "git_status_snapshot"), None)
+        if isinstance(git_status, Mapping):
+            lines.extend(render_git_status_snapshot(git_status))
     if expected_outputs:
         lines.append("- expected_outputs:")
         for output in expected_outputs:
@@ -817,6 +895,26 @@ def inject_permission_prelude(prompt_text: str, *, task: Mapping[str, Any], cwd:
                 lines.append(f"    fallback markers: {output.get('begin')} ... {output.get('end')}")
         lines.append("- If writing an expected output file fails, emit the exact JSONL payload between the fallback markers.")
     return "\n".join(lines) + "\n\n--- task prompt ---\n" + prompt_text
+
+
+def render_git_status_snapshot(snapshot: Mapping[str, Any]) -> list[str]:
+    lines = [
+        "- git_status_snapshot:",
+        f"    ok: {bool(snapshot.get('ok'))}",
+        f"    command: {snapshot.get('command')}",
+    ]
+    if snapshot.get("returncode") is not None:
+        lines.append(f"    returncode: {snapshot.get('returncode')}")
+    stdout_lines = [str(line) for line in snapshot.get("stdout_lines") or []]
+    if stdout_lines:
+        lines.append("    stdout_lines:")
+        lines.extend(f"      {line}" for line in stdout_lines[:80])
+    stderr = str(snapshot.get("stderr") or snapshot.get("error") or "").strip()
+    if stderr:
+        lines.append(f"    stderr: {stderr[:500]}")
+    if snapshot.get("truncated"):
+        lines.append("    truncated: true")
+    return lines
 
 
 def deny_policy_prompt_hint(policy: str) -> str:
