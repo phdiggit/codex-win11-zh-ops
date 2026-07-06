@@ -32,6 +32,7 @@ TERMINAL_TASK_STATUSES = {"planned", "succeeded", "failed", "timed_out", "skippe
 SANDBOX_PROFILES = {"read-only", "local-write", "bypass"}
 PERMISSION_PROFILES = {"review-only", "tmp-jsonl-review", "local-write", "repo-editor", "bypass"}
 DENY_POLICIES = {"fail", "continue-with-final", "deny-fail", "deny-continue", "deny-rewrite"}
+GIT_SNAPSHOT_MODES = {"none", "minimal", "full"}
 DENY_POLICY_ALIASES = {
     "fail": "deny-fail",
     "deny_fail": "deny-fail",
@@ -74,8 +75,13 @@ PROFILE_CAPABILITIES = {
 _BACKGROUND_PROCS: list[subprocess.Popen[str]] = []
 _JSONL_LOCKS: dict[str, threading.Lock] = {}
 EVENT_FAILURE_TYPES = {"error", "turn.failed"}
-USAGE_FAILURE_WORDS = ("usage limit", "rate limit", "quota", "auth", "authentication", "unauthorized", "forbidden", "credit")
 POLICY_FAILURE_WORDS = ("policy", "denied", "not permitted", "permission", "拒绝")
+USAGE_FAILURE_RE = re.compile(r"\b(?:usage limit|quota|credit(?:s)? exhausted|insufficient credit)\b", re.IGNORECASE)
+RATE_LIMIT_RE = re.compile(r"\b(?:rate limit(?:ed| exceeded)?|too many requests)\b", re.IGNORECASE)
+AUTH_FAILURE_RE = re.compile(
+    r"\b(?:auth(?:entication)?\s+(?:failed|required|error)|unauthorized|forbidden|invalid api key|api key\s+(?:missing|invalid|expired)|401|403)\b",
+    re.IGNORECASE,
+)
 GIT_WRITE_RE = re.compile(r"\bgit\s+(?:add|am|apply|bisect|branch|checkout|cherry-pick|clean|commit|merge|mv|pull|push|rebase|reset|restore|revert|rm|stash|switch|tag|worktree)\b", re.IGNORECASE)
 GIT_READ_RE = re.compile(r"\bgit\s+(?:status|diff|show|log|rev-parse|ls-files|grep|branch)\b", re.IGNORECASE)
 DB_COMMAND_RE = re.compile(r"\b(?:psql|mysql|sqlite3|sqlcmd|pg_dump|pg_restore)\b", re.IGNORECASE)
@@ -152,7 +158,9 @@ def run_plan(
     permission_profile: str | None = None,
     deny_policy: str = "fail",
     write_roots: Sequence[str | Path] = (),
+    git_snapshot: str = "minimal",
 ) -> dict[str, Any]:
+    git_snapshot_mode = normalize_git_snapshot_mode(git_snapshot)
     config = {
         "tasks_jsonl": str(Path(tasks_jsonl)),
         "output_root": str(Path(output_root)),
@@ -168,6 +176,7 @@ def run_plan(
         "permission_profile": permission_profile,
         "deny_policy": deny_policy,
         "write_roots": [str(Path(path)) for path in write_roots],
+        "git_snapshot": git_snapshot_mode,
     }
     if background and not dry_run:
         return start_background_run(config)
@@ -235,6 +244,7 @@ def run_plan_foreground(config: Mapping[str, Any], *, launched_in_background: bo
     if permission_profile is not None and permission_profile not in PERMISSION_PROFILES:
         raise AgentRunError(f"unsupported permission profile: {permission_profile}")
     deny_policy = normalize_deny_policy(config.get("deny_policy") or "fail")
+    git_snapshot = normalize_git_snapshot_mode(config.get("git_snapshot") or "minimal")
     heartbeat_seconds = max(0.2, float(config.get("heartbeat_seconds") or 1.0))
     output_root.mkdir(parents=True, exist_ok=True)
     (output_root / "logs").mkdir(parents=True, exist_ok=True)
@@ -248,6 +258,7 @@ def run_plan_foreground(config: Mapping[str, Any], *, launched_in_background: bo
         permission_profile=permission_profile,
         deny_policy=deny_policy,
         write_roots=[str(path) for path in config.get("write_roots") or []],
+        git_snapshot=git_snapshot,
     )
     write_jsonl(output_root / TASKS_FILE, tasks)
 
@@ -310,10 +321,19 @@ def normalize_tasks(
     permission_profile: str | None = None,
     deny_policy: str = "fail",
     write_roots: Sequence[str] = (),
+    git_snapshot: str = "minimal",
 ) -> list[dict[str, Any]]:
     normalized: list[dict[str, Any]] = []
     seen: set[str] = set()
-    context_snapshot = build_context_snapshot(cwd)
+    default_git_snapshot = normalize_git_snapshot_mode(git_snapshot)
+    context_snapshots: dict[str, dict[str, Any]] = {}
+
+    def context_for(mode: str) -> dict[str, Any]:
+        normalized_mode = normalize_git_snapshot_mode(mode)
+        if normalized_mode not in context_snapshots:
+            context_snapshots[normalized_mode] = build_context_snapshot(cwd, mode=normalized_mode)
+        return context_snapshots[normalized_mode]
+
     for index, task in enumerate(tasks, start=1):
         if not isinstance(task, Mapping):
             raise AgentRunError(f"task #{index} is not an object")
@@ -332,6 +352,7 @@ def normalize_tasks(
         patch_path = _resolve_existing_or_declared_path(row.get("patch_path"), cwd)
         expected_output_path = _resolve_existing_or_declared_path(row.get("expected_output_path"), cwd)
         expected_outputs = normalize_expected_outputs(row.get("expected_outputs"), cwd=cwd)
+        task_git_snapshot = normalize_git_snapshot_mode(row.get("git_snapshot") or default_git_snapshot)
         row["task_code"] = task_code
         row["_codex_win"] = {
             "task_index": index,
@@ -351,7 +372,8 @@ def normalize_tasks(
             permission_profile=permission_profile,
             deny_policy=deny_policy,
             write_roots=write_roots,
-            context_snapshot=context_snapshot,
+            context_snapshot=context_for(task_git_snapshot),
+            git_snapshot=task_git_snapshot,
         )
         normalized.append(row)
     return normalized
@@ -389,6 +411,7 @@ def build_permission_record(
     deny_policy: str,
     write_roots: Sequence[str],
     context_snapshot: Mapping[str, Any],
+    git_snapshot: str,
 ) -> dict[str, Any]:
     profile = _optional_str(task.get("permission_profile")) or permission_profile
     if profile is not None and profile not in PERMISSION_PROFILES:
@@ -408,10 +431,12 @@ def build_permission_record(
         denied_commands=denied_commands,
         capabilities=capabilities,
         context_snapshot=context_snapshot,
+        git_snapshot=git_snapshot,
     )
     return {
         "profile": profile,
         "deny_policy": task_deny_policy,
+        "git_snapshot": git_snapshot,
         "sandbox_profile": PROFILE_SANDBOX.get(profile or ""),
         "allowed_write_dirs": deduped_write_dirs,
         "allowed_commands": list(dict.fromkeys(command for command in allowed_commands if command)),
@@ -440,31 +465,44 @@ def resolve_path_list(values: Sequence[str], *, cwd: Path) -> list[Path]:
     return resolved
 
 
-def build_context_snapshot(cwd: Path) -> dict[str, Any]:
-    git_context = collect_git_context_snapshot(cwd)
+def normalize_git_snapshot_mode(value: Any) -> str:
+    mode = str(value or "minimal").strip().lower()
+    if mode not in GIT_SNAPSHOT_MODES:
+        raise AgentRunError(f"unsupported git snapshot mode: {mode}")
+    return mode
+
+
+def build_context_snapshot(cwd: Path, *, mode: str) -> dict[str, Any]:
+    normalized_mode = normalize_git_snapshot_mode(mode)
+    if normalized_mode == "none":
+        return {"git_context": {"ok": False, "mode": "none", "status": "disabled"}, "git_status": {"ok": False, "mode": "none", "status": "disabled"}}
+    git_context = collect_git_context_snapshot(cwd, mode=normalized_mode)
     return {
         "git_context": git_context,
         "git_status": git_context.get("status", {}),
     }
 
 
-def collect_git_context_snapshot(cwd: Path) -> dict[str, Any]:
-    status = run_git_snapshot(cwd, ["status", "--short", "--branch"], max_lines=80)
+def collect_git_context_snapshot(cwd: Path, *, mode: str) -> dict[str, Any]:
+    normalized_mode = normalize_git_snapshot_mode(mode)
+    status_lines = 20 if normalized_mode == "minimal" else 80
+    status = run_git_snapshot(cwd, ["status", "--short", "--branch"], max_lines=status_lines)
     branch = run_git_snapshot(cwd, ["branch", "--show-current"], max_lines=1)
     head = run_git_snapshot(cwd, ["rev-parse", "HEAD"], max_lines=1)
     root = run_git_snapshot(cwd, ["rev-parse", "--show-toplevel"], max_lines=1)
-    diff_stat = run_git_snapshot(cwd, ["diff", "--stat"], max_lines=80)
-    changed_files = run_git_snapshot(cwd, ["diff", "--name-status"], max_lines=120)
     ok = bool(status.get("ok"))
-    return {
+    snapshot = {
         "ok": ok,
+        "mode": normalized_mode,
         "status": status,
         "branch": first_stdout_line(branch),
         "head": first_stdout_line(head),
         "repo_root": first_stdout_line(root),
-        "diff_stat": diff_stat,
-        "changed_files": changed_files,
     }
+    if normalized_mode == "full":
+        snapshot["diff_stat"] = run_git_snapshot(cwd, ["diff", "--stat"], max_lines=80)
+        snapshot["changed_files"] = run_git_snapshot(cwd, ["diff", "--name-status"], max_lines=120)
+    return snapshot
 
 
 def run_git_snapshot(cwd: Path, args: Sequence[str], *, max_lines: int) -> dict[str, Any]:
@@ -506,9 +544,13 @@ def build_readonly_equivalents(
     denied_commands: Sequence[str],
     capabilities: Mapping[str, Any],
     context_snapshot: Mapping[str, Any],
+    git_snapshot: str,
 ) -> list[dict[str, Any]]:
     equivalents: list[dict[str, Any]] = []
     if not profile:
+        return equivalents
+    git_snapshot_mode = normalize_git_snapshot_mode(git_snapshot)
+    if git_snapshot_mode == "none":
         return equivalents
     denied_git = any(str(command).strip().lower() in {"git", "git status"} for command in denied_commands)
     if denied_git and not bool(capabilities.get("git_read")):
@@ -520,6 +562,7 @@ def build_readonly_equivalents(
                 "replacement": "git_context_snapshot",
                 "source": "supervisor",
                 "status": "available" if git_context.get("ok") else "unavailable",
+                "snapshot_mode": git_snapshot_mode,
                 "snapshot": dict(git_context),
                 "git_status_snapshot": dict(git_status),
             }
@@ -1594,8 +1637,7 @@ def analyze_codex_events(path: Path) -> dict[str, Any]:
         if event_type == "turn.completed" and isinstance(event.get("usage"), dict):
             analysis["usage"] = dict(event["usage"])
         message = event_message(event)
-        lower = message.lower()
-        failed = event_type in EVENT_FAILURE_TYPES or any(word in lower for word in USAGE_FAILURE_WORDS)
+        failed = event_type in EVENT_FAILURE_TYPES or message_has_hard_failure(message)
         if failed:
             error_type = classify_failure_message(message, default="codex_event_failed")
             failure = {"line": line_number, "type": event_type, "error_type": error_type, "message": message[:500]}
@@ -1628,7 +1670,7 @@ def analyze_process_text(stderr_path: Path, last_message_path: Path) -> dict[str
             text_parts.append(path.read_text(encoding="utf-8", errors="replace")[:2000])
     text = "\n".join(text_parts)
     lower = text.lower()
-    if any(word in lower for word in USAGE_FAILURE_WORDS):
+    if message_has_hard_failure(text):
         return {"failed": True, "error_type": classify_failure_message(text, default="process_output_failed"), "error_summary": text[:500]}
     if "policy" in lower and any(word in lower for word in POLICY_FAILURE_WORDS):
         return {"failed": True, "error_type": "policy_denied", "error_summary": text[:500]}
@@ -1816,16 +1858,20 @@ def first_nonempty_line(text: str) -> str:
 
 
 def classify_failure_message(message: str, *, default: str) -> str:
-    lower = message.lower()
-    if "usage limit" in lower or "quota" in lower or "credit" in lower:
+    if USAGE_FAILURE_RE.search(message):
         return "usage_limit"
-    if "rate limit" in lower:
+    if RATE_LIMIT_RE.search(message):
         return "rate_limit"
-    if "auth" in lower or "unauthorized" in lower or "forbidden" in lower:
+    if AUTH_FAILURE_RE.search(message):
         return "auth_error"
+    lower = message.lower()
     if "policy" in lower and any(word in lower for word in POLICY_FAILURE_WORDS):
         return "policy_denied"
     return default
+
+
+def message_has_hard_failure(message: str) -> bool:
+    return bool(USAGE_FAILURE_RE.search(message) or RATE_LIMIT_RE.search(message) or AUTH_FAILURE_RE.search(message))
 
 
 def check_task_outputs(task: Mapping[str, Any], paths: Mapping[str, Any], *, last_message_path: Path) -> dict[str, Any]:

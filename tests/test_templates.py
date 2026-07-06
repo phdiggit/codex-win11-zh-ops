@@ -81,6 +81,9 @@ class TemplateTests(unittest.TestCase):
         self.assertIn("expected_outputs", text)
         self.assertIn("PATCH_JSONL_BEGIN", text)
         self.assertIn("permission_analysis", text)
+        self.assertIn("--git-snapshot minimal", text)
+        self.assertIn("--git-snapshot full", text)
+        self.assertIn("--git-snapshot none", text)
         self.assertIn("cleanup-stale", text)
 
     def test_workflow_documents_install_edge_cases(self) -> None:

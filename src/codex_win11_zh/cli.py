@@ -175,6 +175,7 @@ def cmd_agent_run_plan(args: argparse.Namespace) -> int:
                 permission_profile=args.permission_profile,
                 deny_policy=args.deny_policy,
                 write_roots=args.write_root,
+                git_snapshot=args.git_snapshot,
             )
         )
         return 0
@@ -450,6 +451,7 @@ def build_parser() -> argparse.ArgumentParser:
         default="fail",
     )
     p.add_argument("--write-root", action="append", default=[], help="额外允许写入的目录，可重复传入")
+    p.add_argument("--git-snapshot", choices=["minimal", "full", "none"], default="minimal", help="注入子 agent prompt 的 git 只读上下文粒度")
     p.add_argument("--codex-bin", default="codex")
     p.add_argument("--respect-task-argv", action="store_true", help="按任务文件中的 argv 原样执行；默认由 codex-win 重组安全 Codex 命令")
     p.add_argument("--search", action="store_true", help="允许 Codex CLI 使用搜索相关能力；默认关闭浏览/搜索工具")

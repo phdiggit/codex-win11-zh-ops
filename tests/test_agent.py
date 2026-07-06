@@ -63,6 +63,8 @@ if "MENTION_DENIED_GIT" in prompt:
     print("attempted command: git status", file=sys.stderr)
 if "MENTION_GIT_RESET" in prompt:
     print("attempted command: git reset --hard", file=sys.stderr)
+if "WARN_AUTH" in prompt:
+    print("WARN: author metadata is unavailable; continuing with fallback metadata", file=sys.stderr)
 
 if last_message and "LAST_MESSAGE_PATCH" in prompt:
     last_message.write_text(
@@ -318,6 +320,38 @@ class AgentCliTests(unittest.TestCase):
             self.assertEqual("missing_expected_output", results[0]["error_type"])
             self.assertFalse((root / "patches" / "missing_patch_task.jsonl").exists())
 
+    def test_process_warning_with_auth_substring_does_not_fail_valid_output(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            fake = make_fake_codex(root)
+            task = make_task(root, "warn_auth_task", "WARN_AUTH\nPATCH_PATH=patches/warn_auth_task.jsonl\n")
+            tasks_jsonl = write_tasks(root, [task])
+            output_root = root / "agent_run"
+
+            rc = main(
+                [
+                    "agent",
+                    "run-plan",
+                    "--tasks-jsonl",
+                    str(tasks_jsonl),
+                    "--output-root",
+                    str(output_root),
+                    "--cwd",
+                    str(root),
+                    "--codex-bin",
+                    str(fake),
+                    "--timeout-seconds",
+                    "5",
+                ]
+            )
+
+            self.assertEqual(0, rc)
+            status = json.loads((output_root / "status.json").read_text(encoding="utf-8"))
+            self.assertEqual("succeeded", status["status"])
+            results = read_jsonl(output_root / "results.jsonl")
+            self.assertEqual("succeeded", results[0]["status"])
+            self.assertFalse(results[0]["process_analysis"]["failed"])
+
     def test_patch_can_be_recovered_from_last_message_when_enabled(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
@@ -546,6 +580,8 @@ class AgentCliTests(unittest.TestCase):
                     str(fake),
                     "--permission-profile",
                     "tmp-jsonl-review",
+                    "--git-snapshot",
+                    "full",
                     "--timeout-seconds",
                     "5",
                 ]
@@ -594,6 +630,8 @@ class AgentCliTests(unittest.TestCase):
                     str(fake),
                     "--permission-profile",
                     "tmp-jsonl-review",
+                    "--git-snapshot",
+                    "full",
                     "--timeout-seconds",
                     "5",
                 ]
@@ -617,6 +655,98 @@ class AgentCliTests(unittest.TestCase):
             self.assertIn("diff_stat:", dump)
             self.assertIn("changed_files:", dump)
             self.assertIn("Use readonly_equivalents instead of running denied commands.", dump)
+
+    def test_permission_profile_uses_minimal_git_snapshot_by_default(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            subprocess.run(["git", "init"], cwd=root, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            subprocess.run(["git", "config", "user.email", "codex@example.invalid"], cwd=root, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            subprocess.run(["git", "config", "user.name", "Codex Test"], cwd=root, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            (root / "tracked.txt").write_text("before\n", encoding="utf-8")
+            subprocess.run(["git", "add", "tracked.txt"], cwd=root, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            subprocess.run(["git", "commit", "-m", "initial"], cwd=root, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            (root / "tracked.txt").write_text("before\nafter\n", encoding="utf-8")
+            fake = make_fake_codex(root)
+            task = make_task(
+                root,
+                "minimal_readonly_equivalent_task",
+                "DUMP_PROMPT_PATH=tmp/minimal_prompt_dump.md\nPATCH_PATH=tmp/patches/minimal_readonly_equivalent_task.jsonl\n",
+            )
+            task["patch_path"] = "tmp/patches/minimal_readonly_equivalent_task.jsonl"
+            tasks_jsonl = write_tasks(root, [task])
+            output_root = root / "agent_run"
+
+            rc = main(
+                [
+                    "agent",
+                    "run-plan",
+                    "--tasks-jsonl",
+                    str(tasks_jsonl),
+                    "--output-root",
+                    str(output_root),
+                    "--cwd",
+                    str(root),
+                    "--codex-bin",
+                    str(fake),
+                    "--permission-profile",
+                    "tmp-jsonl-review",
+                    "--timeout-seconds",
+                    "5",
+                ]
+            )
+
+            self.assertEqual(0, rc)
+            results = read_jsonl(output_root / "results.jsonl")
+            equivalent = results[0]["permission"]["readonly_equivalents"][0]
+            self.assertEqual("minimal", equivalent["snapshot_mode"])
+            snapshot = equivalent["snapshot"]
+            self.assertEqual("minimal", snapshot["mode"])
+            self.assertNotIn("diff_stat", snapshot)
+            self.assertNotIn("changed_files", snapshot)
+            dump = (root / "tmp" / "minimal_prompt_dump.md").read_text(encoding="utf-8")
+            self.assertIn("git_context_snapshot:", dump)
+            self.assertNotIn("diff_stat:", dump)
+            self.assertNotIn("changed_files:", dump)
+
+    def test_git_snapshot_none_skips_readonly_equivalent_injection(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            fake = make_fake_codex(root)
+            task = make_task(
+                root,
+                "no_git_snapshot_task",
+                "DUMP_PROMPT_PATH=tmp/no_git_prompt_dump.md\nPATCH_PATH=tmp/patches/no_git_snapshot_task.jsonl\n",
+            )
+            task["patch_path"] = "tmp/patches/no_git_snapshot_task.jsonl"
+            tasks_jsonl = write_tasks(root, [task])
+            output_root = root / "agent_run"
+
+            rc = main(
+                [
+                    "agent",
+                    "run-plan",
+                    "--tasks-jsonl",
+                    str(tasks_jsonl),
+                    "--output-root",
+                    str(output_root),
+                    "--cwd",
+                    str(root),
+                    "--codex-bin",
+                    str(fake),
+                    "--permission-profile",
+                    "tmp-jsonl-review",
+                    "--git-snapshot",
+                    "none",
+                    "--timeout-seconds",
+                    "5",
+                ]
+            )
+
+            self.assertEqual(0, rc)
+            results = read_jsonl(output_root / "results.jsonl")
+            self.assertEqual([], results[0]["permission"]["readonly_equivalents"])
+            dump = (root / "tmp" / "no_git_prompt_dump.md").read_text(encoding="utf-8")
+            self.assertNotIn("readonly_equivalents:", dump)
 
     def test_permission_profile_constrains_respected_bypass_argv(self) -> None:
         with tempfile.TemporaryDirectory() as td:

@@ -61,8 +61,9 @@
 3. 子任务 prompt、workitems、patch 和 last message 一律通过 UTF-8 文件传递，不通过 PowerShell inline、管道或 here-string 传递中文、多行 JSON 或 Markdown。
 4. `codex_tasks.jsonl` 中建议每个 task 声明 `task_code`、`prompt_path`、`patch_path`、`last_message_path`、`log_path` 和 `expected_outputs`；JSONL patch 可使用 `PATCH_JSONL_BEGIN` / `PATCH_JSONL_END` 作为 last-message fallback 标记。
 5. 若子 agent 尝试越权命令或被策略拒绝，不要把“进程退出码为 0”视为成功；以 `results.jsonl` 中的 `status`、`error_type`、`permission_analysis`、`deny_resolution`、`output_analysis` 和项目 readiness 为准。
-6. 只有任务卡明确要求可写源码时才使用 `repo-editor`；只有用户明确点名并接受风险时才使用 `bypass`。使用更高权限 profile 时，仍必须声明输出契约和收尾验证。
-7. 后台 run 必须用 `status`、`wait`、`collect` 收尾；异常中断后先用 `cleanup-stale` 清理残留进程，再读取 `summary.json` / `results.jsonl` 判断是否可恢复。
+6. 默认使用 `--git-snapshot minimal`，只给子 agent 少量 git 摘要；只有任务明确需要 diff stat/name-status 时才用 `--git-snapshot full`，完全不需要 git 上下文时用 `--git-snapshot none`。
+7. 只有任务卡明确要求可写源码时才使用 `repo-editor`；只有用户明确点名并接受风险时才使用 `bypass`。使用更高权限 profile 时，仍必须声明输出契约和收尾验证。
+8. 后台 run 必须用 `status`、`wait`、`collect` 收尾；异常中断后先用 `cleanup-stale` 清理残留进程，再读取 `summary.json` / `results.jsonl` 判断是否可恢复。
 
 ## GitHub、Commit 与 PR
 

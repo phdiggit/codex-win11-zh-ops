@@ -13,6 +13,7 @@ codex-win agent run-plan `
   --cwd . `
   --permission-profile tmp-jsonl-review `
   --deny-policy deny-rewrite `
+  --git-snapshot minimal `
   --max-workers 4 `
   --timeout-seconds 1800
 ```
@@ -90,13 +91,16 @@ retrieval/patch 类任务推荐 `deny-rewrite`。这样子 Codex 即使因为禁
 当 profile 禁止子 agent 自行运行 `git status` 时，supervisor 会预先采集 `readonly_equivalents.git_context_snapshot`，包含：
 
 - `git status --short --branch`
-- `git diff --stat`
-- `git diff --name-status`
 - `git rev-parse HEAD`
 - 当前 branch
 - repo root
 
-这份快照会进入 `results.jsonl` 的 permission record，并被注入 prompt prelude。子 agent 应使用快照，不要自行运行被禁止的 git 命令。
+默认 `--git-snapshot minimal` 只注入上述轻量摘要，避免给每个子任务增加固定大段 token。需要完整变更摘要时使用 `--git-snapshot full`，会额外注入：
+
+- `git diff --stat`
+- `git diff --name-status`
+
+完全不需要 git 上下文时使用 `--git-snapshot none`。任务 JSON 可用 `git_snapshot` 覆盖单个 task，例如某个任务写 `"git_snapshot":"full"`。这份快照会进入 `results.jsonl` 的 permission record，并被注入 prompt prelude。子 agent 应使用快照，不要自行运行被禁止的 git 命令。
 
 ## 输出文件
 
