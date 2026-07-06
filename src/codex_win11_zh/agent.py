@@ -437,6 +437,22 @@ def run_one_task(
         return result
     permission = task_permission(task)
     task_sandbox_profile = effective_task_sandbox(task, default_sandbox=sandbox_profile)
+    preflight = validate_permission_preflight(task, permission=permission)
+    if preflight.get("failed"):
+        finished_at = utc_now_iso()
+        result = {
+            "task_code": task_code,
+            "status": "failed",
+            "error_type": preflight.get("error_type"),
+            "error": preflight.get("error_summary"),
+            "finished_at": finished_at,
+            "paths": dict(paths),
+            "permission": permission,
+            "permission_analysis": preflight,
+        }
+        state.append_result(result)
+        state.update_task(task_code, status="failed", error_type=result["error_type"], error=result["error"], finished_at=finished_at, permission=permission)
+        return result
     prompt_text = inject_permission_prelude(prompt_path.read_text(encoding="utf-8"), task=task, cwd=cwd)
     prompt_bytes = len(prompt_text.encode("utf-8"))
 
@@ -449,6 +465,7 @@ def run_one_task(
         respect_task_argv=respect_task_argv,
         search=search,
         allowed_write_dirs=[Path(path) for path in permission.get("allowed_write_dirs") or []],
+        enforce_permission_sandbox=bool(permission.get("profile")),
     )
     command_info = build_command_info(task, command=command, sandbox_profile=task_sandbox_profile, respect_task_argv=respect_task_argv)
     started_at = utc_now_iso()
@@ -606,6 +623,7 @@ def build_task_command(
     respect_task_argv: bool,
     search: bool,
     allowed_write_dirs: Sequence[Path] = (),
+    enforce_permission_sandbox: bool = False,
 ) -> list[str]:
     paths = task["_codex_win"] if isinstance(task.get("_codex_win"), Mapping) else {}
     last_message_path = str(paths.get("last_message_path"))
@@ -614,7 +632,14 @@ def build_task_command(
         if not argv:
             raise AgentRunError(f"task {task.get('task_code')} has no argv")
         argv[0] = resolve_executable(argv[0], cwd=cwd)
-        return normalize_respected_codex_argv(argv, cwd=cwd, last_message_path=last_message_path, allowed_write_dirs=allowed_write_dirs)
+        return normalize_respected_codex_argv(
+            argv,
+            cwd=cwd,
+            sandbox_profile=sandbox_profile,
+            last_message_path=last_message_path,
+            allowed_write_dirs=allowed_write_dirs,
+            enforce_permission_sandbox=enforce_permission_sandbox,
+        )
 
     codex_bin = resolve_executable(codex_bin, cwd=cwd)
     if sandbox_profile == "bypass":
@@ -647,6 +672,7 @@ def build_command_info(task: Mapping[str, Any], *, command: Sequence[str], sandb
         "original_argv_sandbox": original_sandbox,
         "actual_sandbox": actual_sandbox,
         "sandbox_overrode_task_argv": bool(raw_argv and not respect_task_argv and original_sandbox and original_sandbox != actual_sandbox),
+        "permission_sandbox_overrode_task_argv": bool(permission.get("profile") and raw_argv and original_sandbox and original_sandbox != actual_sandbox),
     }
     if raw_argv:
         info["original_argv"] = command_to_text(raw_argv)
@@ -669,6 +695,46 @@ def effective_task_sandbox(task: Mapping[str, Any], *, default_sandbox: str) -> 
         return permission_sandbox
     task_sandbox = _optional_str(task.get("sandbox_profile"))
     return task_sandbox or default_sandbox
+
+
+def validate_permission_preflight(task: Mapping[str, Any], *, permission: Mapping[str, Any]) -> dict[str, Any]:
+    if not permission.get("profile"):
+        return {"failed": False}
+    allowed_roots = [Path(str(path)) for path in permission.get("allowed_write_dirs") or []]
+    if not allowed_roots:
+        return {"failed": False}
+    violations: list[dict[str, str]] = []
+    paths = task["_codex_win"] if isinstance(task.get("_codex_win"), Mapping) else {}
+    for label, value in [
+        ("patch_path", paths.get("patch_path") if isinstance(paths, Mapping) else None),
+        ("expected_output_path", paths.get("expected_output_path") if isinstance(paths, Mapping) else None),
+    ]:
+        if value and not path_is_under_any(Path(str(value)), allowed_roots):
+            violations.append({"label": label, "path": str(value)})
+    for index, output in enumerate(expected_output_contracts(task), start=1):
+        output_path = Path(str(output.get("path")))
+        if not path_is_under_any(output_path, allowed_roots):
+            violations.append({"label": f"expected_outputs[{index}]", "path": str(output_path)})
+    if violations:
+        return {
+            "failed": True,
+            "error_type": "permission_output_path_denied",
+            "error_summary": f"declared output path is outside allowed_write_dirs: {violations[0]['path']}",
+            "violations": violations,
+            "allowed_write_dirs": [str(path) for path in allowed_roots],
+        }
+    return {"failed": False, "allowed_write_dirs": [str(path) for path in allowed_roots]}
+
+
+def path_is_under_any(path: Path, roots: Sequence[Path]) -> bool:
+    resolved = path.resolve()
+    for root in roots:
+        try:
+            resolved.relative_to(root.resolve())
+            return True
+        except ValueError:
+            continue
+    return False
 
 
 def inject_permission_prelude(prompt_text: str, *, task: Mapping[str, Any], cwd: Path) -> str:
@@ -719,10 +785,20 @@ def dedupe_paths(paths: Sequence[Path]) -> list[Path]:
     return result
 
 
-def normalize_respected_codex_argv(argv: list[str], *, cwd: Path, last_message_path: str, allowed_write_dirs: Sequence[Path] = ()) -> list[str]:
+def normalize_respected_codex_argv(
+    argv: list[str],
+    *,
+    cwd: Path,
+    sandbox_profile: str | None = None,
+    last_message_path: str,
+    allowed_write_dirs: Sequence[Path] = (),
+    enforce_permission_sandbox: bool = False,
+) -> list[str]:
     exec_index = _codex_exec_index(argv)
     if exec_index is None:
         return argv
+    if enforce_permission_sandbox and sandbox_profile:
+        enforce_codex_exec_sandbox(argv, exec_index=exec_index, sandbox_profile=sandbox_profile)
     if "--output-last-message" not in argv and last_message_path:
         insert_codex_exec_options(argv, exec_index=exec_index, options=["--output-last-message", last_message_path])
     if "--json" not in argv:
@@ -734,6 +810,39 @@ def normalize_respected_codex_argv(argv: list[str], *, cwd: Path, last_message_p
     if not codex_exec_reads_stdin(argv, exec_index=exec_index) and not codex_exec_has_prompt_argument(argv, exec_index=exec_index):
         argv.append("-")
     return argv
+
+
+def enforce_codex_exec_sandbox(argv: list[str], *, exec_index: int, sandbox_profile: str) -> None:
+    remove_codex_exec_sandbox_options(argv, exec_index=exec_index)
+    if sandbox_profile == "bypass":
+        insert_codex_exec_options(argv, exec_index=exec_index, options=["--dangerously-bypass-approvals-and-sandbox"])
+        return
+    sandbox = "read-only" if sandbox_profile == "read-only" else "workspace-write"
+    insert_codex_exec_options(argv, exec_index=exec_index, options=["-s", sandbox])
+
+
+def remove_codex_exec_sandbox_options(argv: list[str], *, exec_index: int) -> None:
+    index = exec_index + 1
+    prompt_index = codex_exec_prompt_index(argv, exec_index=exec_index)
+    while index < (prompt_index if prompt_index is not None else len(argv)):
+        part = str(argv[index])
+        if part == "--dangerously-bypass-approvals-and-sandbox":
+            del argv[index]
+            if prompt_index is not None:
+                prompt_index -= 1
+            continue
+        if part in {"-s", "--sandbox"}:
+            deleted = min(2, len(argv) - index)
+            del argv[index : index + deleted]
+            if prompt_index is not None:
+                prompt_index -= deleted
+            continue
+        if part.startswith("--sandbox="):
+            del argv[index]
+            if prompt_index is not None:
+                prompt_index -= 1
+            continue
+        index += 1
 
 
 def _codex_exec_index(argv: Sequence[str]) -> int | None:

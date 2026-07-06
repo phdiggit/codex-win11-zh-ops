@@ -164,7 +164,7 @@ codex-win agent run-plan `
   --write-root tmp\profile_basis
 ```
 
-首版内置 `review-only`、`tmp-jsonl-review`、`local-write`、`repo-editor`、`bypass`。`permission_profile` 会写入任务快照和 `results.jsonl`，并映射到有效 sandbox、额外可写目录、禁止命令提示和 prompt 前置权限边界。任务 JSON 可以覆盖全局值：`permission_profile`、`deny_policy`、`allowed_write_paths`、`denied_commands`。这不是完整命令拦截器；首版通过 Codex sandbox、prompt 边界、产物契约和结果分析兜住长任务风险。
+首版内置 `review-only`、`tmp-jsonl-review`、`local-write`、`repo-editor`、`bypass`。`permission_profile` 会写入任务快照和 `results.jsonl`，并映射到有效 sandbox、额外可写目录、禁止命令提示和 prompt 前置权限边界。即使使用 `--respect-task-argv`，声明了 profile 的任务也会按 profile 约束 `codex exec` 的 sandbox；例如 `tmp-jsonl-review` 不会允许原 argv 里的 bypass 继续生效。任务 JSON 可以覆盖全局值：`permission_profile`、`deny_policy`、`allowed_write_paths`、`denied_commands`。这不是完整命令拦截器；首版通过 Codex sandbox、prompt 边界、产物契约和结果分析兜住长任务风险。
 
 任务可以声明通用输出契约：
 
@@ -185,6 +185,8 @@ codex-win agent run-plan `
 ```
 
 `jsonl_patch` 会检查文件存在、非空和 JSONL object 行格式。若声明 `fallback: last_message_marked_block` 且文件未写出，run-plan 会从 last message 的 `begin/end` 标记块恢复 JSONL 文件。`deny-policy=continue-with-final` 时，策略拒绝类输出不会在契约已满足时直接判失败，而会在 `process_analysis` / `permission_analysis` 里记录降级和命令风险。
+
+声明了 profile 时，`patch_path`、`expected_output_path` 和 `expected_outputs[*].path` 必须位于允许写根内；否则任务会在启动子 Codex 前以 `permission_output_path_denied` 失败，避免长任务跑完才发现产物越界。
 
 每个 `output-root` 会写入这些通用文件：
 

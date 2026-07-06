@@ -413,6 +413,95 @@ class AgentCliTests(unittest.TestCase):
             patch_rows = read_jsonl(root / "tmp" / "patches" / "policy_recovery_task.jsonl")
             self.assertEqual("policy_recovered_patch", patch_rows[0]["kind"])
 
+    def test_permission_profile_constrains_respected_bypass_argv(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            fake = make_fake_codex(root)
+            task = make_task(root, "respect_bypass_constrained_task", "PATCH_PATH=tmp/patches/respect_bypass_constrained_task.jsonl\n")
+            task["patch_path"] = "tmp/patches/respect_bypass_constrained_task.jsonl"
+            task["argv"] = [
+                fake.name,
+                "exec",
+                "--dangerously-bypass-approvals-and-sandbox",
+                "--output-last-message",
+                task["last_message_path"],
+                "--json",
+            ]
+            tasks_jsonl = write_tasks(root, [task])
+            output_root = root / "agent_run"
+
+            rc = main(
+                [
+                    "agent",
+                    "run-plan",
+                    "--tasks-jsonl",
+                    str(tasks_jsonl),
+                    "--output-root",
+                    str(output_root),
+                    "--cwd",
+                    str(root),
+                    "--respect-task-argv",
+                    "--permission-profile",
+                    "tmp-jsonl-review",
+                    "--timeout-seconds",
+                    "5",
+                ]
+            )
+
+            self.assertEqual(0, rc)
+            results = read_jsonl(output_root / "results.jsonl")
+            self.assertEqual("succeeded", results[0]["status"])
+            self.assertEqual("bypass", results[0]["command_info"]["original_argv_sandbox"])
+            self.assertEqual("workspace-write", results[0]["command_info"]["actual_sandbox"])
+            self.assertTrue(results[0]["command_info"]["respect_task_argv_adjusted"])
+            self.assertTrue(results[0]["command_info"]["permission_sandbox_overrode_task_argv"])
+            status = json.loads((output_root / "status.json").read_text(encoding="utf-8"))
+            self.assertNotIn("--dangerously-bypass-approvals-and-sandbox", status["tasks"][0]["command"])
+            self.assertIn(str(root / "tmp"), results[0]["command_info"]["additional_writable_dirs"])
+
+    def test_permission_profile_fails_output_path_outside_allowed_write_dirs(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            fake = make_fake_codex(root)
+            task = make_task(root, "outside_output_task", "NO_PATCH\nMARKED_PATCH\n")
+            task["patch_path"] = ""
+            task["expected_outputs"] = [
+                {
+                    "kind": "jsonl_patch",
+                    "path": "patches/outside_output_task.jsonl",
+                    "fallback": "last_message_marked_block",
+                    "begin": "PATCH_JSONL_BEGIN",
+                    "end": "PATCH_JSONL_END",
+                }
+            ]
+            tasks_jsonl = write_tasks(root, [task])
+            output_root = root / "agent_run"
+
+            rc = main(
+                [
+                    "agent",
+                    "run-plan",
+                    "--tasks-jsonl",
+                    str(tasks_jsonl),
+                    "--output-root",
+                    str(output_root),
+                    "--cwd",
+                    str(root),
+                    "--codex-bin",
+                    str(fake),
+                    "--permission-profile",
+                    "tmp-jsonl-review",
+                    "--timeout-seconds",
+                    "5",
+                ]
+            )
+
+            self.assertEqual(0, rc)
+            results = read_jsonl(output_root / "results.jsonl")
+            self.assertEqual("failed", results[0]["status"])
+            self.assertEqual("permission_output_path_denied", results[0]["error_type"])
+            self.assertFalse((root / "logs" / "outside_output_task.last.md").exists())
+
     def test_expected_output_path_contract_marks_task_failed(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
