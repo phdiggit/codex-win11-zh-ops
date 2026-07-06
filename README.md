@@ -194,7 +194,7 @@ codex-win agent run-plan `
 - `deny-continue`：产物契约已满足时降级为风险记录，否则失败。
 - `deny-rewrite` / `continue-with-final`：只有从 last message fallback 成功恢复产物时才降级；否则失败。
 
-当 profile 禁止子 agent 运行 `git status` 时，supervisor 会预先采集一次 `git -c core.quotepath=false status --short --branch`，并把它作为 `readonly_equivalents.git_status_snapshot` 写入 permission record 和 prompt prelude。子 agent 应使用这份快照，而不是自行运行被禁止的 git 命令。
+当 profile 禁止子 agent 运行 `git status` 时，supervisor 会预先采集一次 git 只读上下文，包括 `status --short --branch`、`diff --stat`、`diff --name-status`、`rev-parse HEAD`、当前 branch 和 repo root，并把它作为 `readonly_equivalents.git_context_snapshot` 写入 permission record 和 prompt prelude。子 agent 应使用这份快照，而不是自行运行被禁止的 git 命令。
 
 每个 `output-root` 会写入这些通用文件：
 

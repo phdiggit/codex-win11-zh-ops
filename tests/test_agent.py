@@ -539,6 +539,12 @@ class AgentCliTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
             subprocess.run(["git", "init"], cwd=root, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            subprocess.run(["git", "config", "user.email", "codex@example.invalid"], cwd=root, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            subprocess.run(["git", "config", "user.name", "Codex Test"], cwd=root, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            (root / "tracked.txt").write_text("before\n", encoding="utf-8")
+            subprocess.run(["git", "add", "tracked.txt"], cwd=root, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            subprocess.run(["git", "commit", "-m", "initial"], cwd=root, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            (root / "tracked.txt").write_text("before\nafter\n", encoding="utf-8")
             (root / "visible.txt").write_text("visible\n", encoding="utf-8")
             fake = make_fake_codex(root)
             task = make_task(
@@ -574,11 +580,18 @@ class AgentCliTests(unittest.TestCase):
             self.assertEqual("succeeded", results[0]["status"])
             equivalents = results[0]["permission"]["readonly_equivalents"]
             self.assertEqual("git status", equivalents[0]["command"])
+            self.assertEqual("git_context_snapshot", equivalents[0]["replacement"])
             self.assertEqual("available", equivalents[0]["status"])
+            snapshot = equivalents[0]["snapshot"]
+            self.assertTrue(snapshot["head"])
+            self.assertIn("tracked.txt", "\n".join(snapshot["changed_files"]["stdout_lines"]))
             dump = (root / "tmp" / "prompt_dump.md").read_text(encoding="utf-8")
             self.assertIn("readonly_equivalents:", dump)
-            self.assertIn("git_status_snapshot:", dump)
+            self.assertIn("git_context_snapshot:", dump)
             self.assertIn("?? visible.txt", dump)
+            self.assertIn("tracked.txt", dump)
+            self.assertIn("diff_stat:", dump)
+            self.assertIn("changed_files:", dump)
             self.assertIn("Use readonly_equivalents instead of running denied commands.", dump)
 
     def test_permission_profile_constrains_respected_bypass_argv(self) -> None:

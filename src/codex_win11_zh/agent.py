@@ -441,13 +441,34 @@ def resolve_path_list(values: Sequence[str], *, cwd: Path) -> list[Path]:
 
 
 def build_context_snapshot(cwd: Path) -> dict[str, Any]:
+    git_context = collect_git_context_snapshot(cwd)
     return {
-        "git_status": collect_git_status_snapshot(cwd),
+        "git_context": git_context,
+        "git_status": git_context.get("status", {}),
     }
 
 
-def collect_git_status_snapshot(cwd: Path) -> dict[str, Any]:
-    command = ["git", "-c", "core.quotepath=false", "status", "--short", "--branch"]
+def collect_git_context_snapshot(cwd: Path) -> dict[str, Any]:
+    status = run_git_snapshot(cwd, ["status", "--short", "--branch"], max_lines=80)
+    branch = run_git_snapshot(cwd, ["branch", "--show-current"], max_lines=1)
+    head = run_git_snapshot(cwd, ["rev-parse", "HEAD"], max_lines=1)
+    root = run_git_snapshot(cwd, ["rev-parse", "--show-toplevel"], max_lines=1)
+    diff_stat = run_git_snapshot(cwd, ["diff", "--stat"], max_lines=80)
+    changed_files = run_git_snapshot(cwd, ["diff", "--name-status"], max_lines=120)
+    ok = bool(status.get("ok"))
+    return {
+        "ok": ok,
+        "status": status,
+        "branch": first_stdout_line(branch),
+        "head": first_stdout_line(head),
+        "repo_root": first_stdout_line(root),
+        "diff_stat": diff_stat,
+        "changed_files": changed_files,
+    }
+
+
+def run_git_snapshot(cwd: Path, args: Sequence[str], *, max_lines: int) -> dict[str, Any]:
+    command = ["git", "-c", "core.quotepath=false", *args]
     try:
         completed = subprocess.run(
             command,
@@ -468,10 +489,15 @@ def collect_git_status_snapshot(cwd: Path) -> dict[str, Any]:
         "ok": completed.returncode == 0,
         "command": command_to_text(command),
         "returncode": completed.returncode,
-        "stdout_lines": stdout_lines[:80],
+        "stdout_lines": stdout_lines[:max_lines],
         "stderr": completed.stderr.strip()[:1000],
-        "truncated": len(stdout_lines) > 80,
+        "truncated": len(stdout_lines) > max_lines,
     }
+
+
+def first_stdout_line(snapshot: Mapping[str, Any]) -> str:
+    lines = snapshot.get("stdout_lines") if isinstance(snapshot.get("stdout_lines"), Sequence) and not isinstance(snapshot.get("stdout_lines"), (str, bytes)) else []
+    return str(lines[0]) if lines else ""
 
 
 def build_readonly_equivalents(
@@ -486,14 +512,16 @@ def build_readonly_equivalents(
         return equivalents
     denied_git = any(str(command).strip().lower() in {"git", "git status"} for command in denied_commands)
     if denied_git and not bool(capabilities.get("git_read")):
+        git_context = context_snapshot.get("git_context") if isinstance(context_snapshot.get("git_context"), Mapping) else {"ok": False}
         git_status = context_snapshot.get("git_status") if isinstance(context_snapshot.get("git_status"), Mapping) else {"ok": False}
         equivalents.append(
             {
                 "command": "git status",
-                "replacement": "git_status_snapshot",
+                "replacement": "git_context_snapshot",
                 "source": "supervisor",
-                "status": "available" if git_status.get("ok") else "unavailable",
-                "snapshot": dict(git_status),
+                "status": "available" if git_context.get("ok") else "unavailable",
+                "snapshot": dict(git_context),
+                "git_status_snapshot": dict(git_status),
             }
         )
     return equivalents
@@ -884,9 +912,9 @@ def inject_permission_prelude(prompt_text: str, *, task: Mapping[str, Any], cwd:
         for item in readonly_equivalents:
             lines.append(f"  - {item.get('command')} => {item.get('replacement')} ({item.get('status')})")
         lines.append("- Use readonly_equivalents instead of running denied commands.")
-        git_status = next((item.get("snapshot") for item in readonly_equivalents if item.get("replacement") == "git_status_snapshot"), None)
-        if isinstance(git_status, Mapping):
-            lines.extend(render_git_status_snapshot(git_status))
+        git_context = next((item.get("snapshot") for item in readonly_equivalents if item.get("replacement") in {"git_context_snapshot", "git_status_snapshot"}), None)
+        if isinstance(git_context, Mapping):
+            lines.extend(render_git_context_snapshot(git_context))
     if expected_outputs:
         lines.append("- expected_outputs:")
         for output in expected_outputs:
@@ -897,23 +925,42 @@ def inject_permission_prelude(prompt_text: str, *, task: Mapping[str, Any], cwd:
     return "\n".join(lines) + "\n\n--- task prompt ---\n" + prompt_text
 
 
-def render_git_status_snapshot(snapshot: Mapping[str, Any]) -> list[str]:
+def render_git_context_snapshot(snapshot: Mapping[str, Any]) -> list[str]:
     lines = [
-        "- git_status_snapshot:",
+        "- git_context_snapshot:",
         f"    ok: {bool(snapshot.get('ok'))}",
-        f"    command: {snapshot.get('command')}",
+    ]
+    for label in ("repo_root", "branch", "head"):
+        if snapshot.get(label):
+            lines.append(f"    {label}: {snapshot.get(label)}")
+    status = snapshot.get("status") if isinstance(snapshot.get("status"), Mapping) else snapshot
+    lines.extend(render_snapshot_lines("status", status))
+    diff_stat = snapshot.get("diff_stat") if isinstance(snapshot.get("diff_stat"), Mapping) else None
+    if diff_stat:
+        lines.extend(render_snapshot_lines("diff_stat", diff_stat))
+    changed_files = snapshot.get("changed_files") if isinstance(snapshot.get("changed_files"), Mapping) else None
+    if changed_files:
+        lines.extend(render_snapshot_lines("changed_files", changed_files))
+    return lines
+
+
+def render_snapshot_lines(label: str, snapshot: Mapping[str, Any]) -> list[str]:
+    lines = [
+        f"    {label}:",
+        f"      ok: {bool(snapshot.get('ok'))}",
+        f"      command: {snapshot.get('command')}",
     ]
     if snapshot.get("returncode") is not None:
-        lines.append(f"    returncode: {snapshot.get('returncode')}")
+        lines.append(f"      returncode: {snapshot.get('returncode')}")
     stdout_lines = [str(line) for line in snapshot.get("stdout_lines") or []]
     if stdout_lines:
-        lines.append("    stdout_lines:")
-        lines.extend(f"      {line}" for line in stdout_lines[:80])
+        lines.append("      stdout_lines:")
+        lines.extend(f"        {line}" for line in stdout_lines[:120])
     stderr = str(snapshot.get("stderr") or snapshot.get("error") or "").strip()
     if stderr:
-        lines.append(f"    stderr: {stderr[:500]}")
+        lines.append(f"      stderr: {stderr[:500]}")
     if snapshot.get("truncated"):
-        lines.append("    truncated: true")
+        lines.append("      truncated: true")
     return lines
 
 
