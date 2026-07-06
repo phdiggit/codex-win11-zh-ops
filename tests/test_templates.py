@@ -75,6 +75,13 @@ class TemplateTests(unittest.TestCase):
         self.assertIn("gh --jq", text)
         self.assertIn("codex-win agents lint", text)
         self.assertIn("不静默降级", text)
+        self.assertIn("## 子 Agent 与批量任务", text)
+        self.assertIn("codex-win agent run-plan", text)
+        self.assertIn("--permission-profile tmp-jsonl-review --deny-policy deny-rewrite", text)
+        self.assertIn("expected_outputs", text)
+        self.assertIn("PATCH_JSONL_BEGIN", text)
+        self.assertIn("permission_analysis", text)
+        self.assertIn("cleanup-stale", text)
 
     def test_workflow_documents_install_edge_cases(self) -> None:
         text = (ROOT / "templates" / "repo" / "codex-workflow.md").read_text(encoding="utf-8")
