@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import signal
 import shutil
 import subprocess
@@ -45,11 +46,29 @@ PROFILE_DENIED_COMMANDS = {
     "repo-editor": ["git reset", "git checkout", "git clean", "psql", "apply --execute"],
     "bypass": [],
 }
+PROFILE_ALLOWED_COMMANDS = {
+    "review-only": [],
+    "tmp-jsonl-review": [],
+    "local-write": ["python", "pwsh", "powershell", "cmd", "git status", "git diff"],
+    "repo-editor": ["python", "pwsh", "powershell", "cmd", "git status", "git diff", "pytest"],
+    "bypass": ["*"],
+}
+PROFILE_CAPABILITIES = {
+    "review-only": {"network": False, "database": False, "git_read": False, "git_write": False},
+    "tmp-jsonl-review": {"network": False, "database": False, "git_read": False, "git_write": False},
+    "local-write": {"network": False, "database": False, "git_read": True, "git_write": False},
+    "repo-editor": {"network": False, "database": False, "git_read": True, "git_write": False},
+    "bypass": {"network": True, "database": True, "git_read": True, "git_write": True},
+}
 _BACKGROUND_PROCS: list[subprocess.Popen[str]] = []
 _JSONL_LOCKS: dict[str, threading.Lock] = {}
 EVENT_FAILURE_TYPES = {"error", "turn.failed"}
 USAGE_FAILURE_WORDS = ("usage limit", "rate limit", "quota", "auth", "authentication", "unauthorized", "forbidden", "credit")
 POLICY_FAILURE_WORDS = ("policy", "denied", "not permitted", "permission", "拒绝")
+GIT_WRITE_RE = re.compile(r"\bgit\s+(?:add|am|apply|bisect|branch|checkout|cherry-pick|clean|commit|merge|mv|pull|push|rebase|reset|restore|revert|rm|stash|switch|tag|worktree)\b", re.IGNORECASE)
+GIT_READ_RE = re.compile(r"\bgit\s+(?:status|diff|show|log|rev-parse|ls-files|grep|branch)\b", re.IGNORECASE)
+DB_COMMAND_RE = re.compile(r"\b(?:psql|mysql|sqlite3|sqlcmd|pg_dump|pg_restore)\b", re.IGNORECASE)
+NETWORK_COMMAND_RE = re.compile(r"\b(?:curl|wget|Invoke-WebRequest|Invoke-RestMethod|iwr|irm|gh\s+api)\b", re.IGNORECASE)
 
 
 class AgentRunError(RuntimeError):
@@ -367,6 +386,9 @@ def build_permission_record(
         raise AgentRunError(f"unsupported deny policy: {task_deny_policy}")
     denied_commands = list(PROFILE_DENIED_COMMANDS.get(profile or "", []))
     denied_commands.extend(_string_list(task.get("denied_commands")))
+    allowed_commands = list(PROFILE_ALLOWED_COMMANDS.get(profile or "", []))
+    allowed_commands.extend(_string_list(task.get("allowed_commands")))
+    capabilities = dict(PROFILE_CAPABILITIES.get(profile or "", {}))
     allowed_write_dirs = default_write_dirs_for_profile(profile, cwd=cwd, output_root=output_root)
     allowed_write_dirs.extend(resolve_path_list(write_roots, cwd=cwd))
     allowed_write_dirs.extend(resolve_path_list(_string_list(task.get("allowed_write_paths")), cwd=cwd))
@@ -376,7 +398,9 @@ def build_permission_record(
         "deny_policy": task_deny_policy,
         "sandbox_profile": PROFILE_SANDBOX.get(profile or ""),
         "allowed_write_dirs": deduped_write_dirs,
+        "allowed_commands": list(dict.fromkeys(command for command in allowed_commands if command)),
         "denied_commands": list(dict.fromkeys(command for command in denied_commands if command)),
+        "capabilities": capabilities,
     }
 
 
@@ -548,11 +572,15 @@ def run_one_task(
     event_analysis = analyze_codex_events(stdout_path)
     output_analysis = check_task_outputs(task, paths, last_message_path=last_message_path)
     process_analysis = analyze_process_text(stderr_path, last_message_path)
-    permission_analysis = analyze_permission_output(task, stderr_path, last_message_path)
+    permission_analysis = analyze_permission_output(task, stdout_path, stderr_path, last_message_path)
     if process_analysis.get("failed") and process_analysis.get("error_type") == "policy_denied" and permission.get("deny_policy") == "continue-with-final":
         process_analysis = dict(process_analysis)
         process_analysis["failed"] = False
         process_analysis["downgraded_by_deny_policy"] = True
+    if permission_analysis.get("failed") and permission.get("deny_policy") == "continue-with-final" and not output_analysis.get("failed"):
+        permission_analysis = dict(permission_analysis)
+        permission_analysis["failed"] = False
+        permission_analysis["downgraded_by_deny_policy"] = True
     status = "timed_out" if timed_out else ("succeeded" if int(returncode) == 0 else "failed")
     failure: dict[str, Any] | None = None
     if timed_out:
@@ -563,6 +591,8 @@ def run_one_task(
         failure = {"type": event_analysis.get("error_type") or "codex_event_failed", "message": event_analysis.get("error_summary") or "Codex event log reported failure"}
     elif process_analysis.get("failed"):
         failure = {"type": process_analysis.get("error_type") or "process_output_failed", "message": process_analysis.get("error_summary") or "process output reported failure"}
+    elif permission_analysis.get("failed"):
+        failure = {"type": permission_analysis.get("error_type") or "permission_policy_failed", "message": permission_analysis.get("error_summary") or "permission policy reported failure"}
     elif output_analysis.get("failed"):
         failure = {"type": output_analysis.get("error_type") or "missing_expected_output", "message": output_analysis.get("error_summary") or "expected output contract was not satisfied"}
     if failure is not None and status != "timed_out":
@@ -685,7 +715,11 @@ def build_command_info(task: Mapping[str, Any], *, command: Sequence[str], sandb
 def task_permission(task: Mapping[str, Any]) -> dict[str, Any]:
     paths = task["_codex_win"] if isinstance(task.get("_codex_win"), Mapping) else {}
     permission = paths.get("permission") if isinstance(paths, Mapping) else None
-    return dict(permission) if isinstance(permission, Mapping) else {"profile": None, "deny_policy": "fail", "allowed_write_dirs": [], "denied_commands": []}
+    return (
+        dict(permission)
+        if isinstance(permission, Mapping)
+        else {"profile": None, "deny_policy": "fail", "allowed_write_dirs": [], "allowed_commands": [], "denied_commands": [], "capabilities": {}}
+    )
 
 
 def effective_task_sandbox(task: Mapping[str, Any], *, default_sandbox: str) -> str:
@@ -1428,18 +1462,138 @@ def analyze_process_text(stderr_path: Path, last_message_path: Path) -> dict[str
     return {"failed": False}
 
 
-def analyze_permission_output(task: Mapping[str, Any], stderr_path: Path, last_message_path: Path) -> dict[str, Any]:
+def analyze_permission_output(task: Mapping[str, Any], *paths: Path) -> dict[str, Any]:
     permission = task_permission(task)
     denied = [str(command).strip() for command in permission.get("denied_commands") or [] if str(command).strip()]
-    if not denied:
-        return {"denied_command_mentions": []}
+    capabilities = permission.get("capabilities") if isinstance(permission.get("capabilities"), Mapping) else {}
     text_parts: list[str] = []
-    for path in (stderr_path, last_message_path):
+    for path in paths:
         if path.exists():
             text_parts.append(path.read_text(encoding="utf-8", errors="replace")[:4000])
-    text = "\n".join(text_parts).lower()
-    mentions = [command for command in denied if command.lower() in text]
-    return {"denied_command_mentions": mentions, "deny_policy": permission.get("deny_policy")}
+    text = "\n".join(text_parts)
+    lower = text.lower()
+    mentions = [command for command in denied if command_mentioned(command, lower)]
+    events: list[dict[str, Any]] = []
+    for command in mentions:
+        events.append(
+            {
+                "type": "denied_command_mentioned",
+                "command": command,
+                "severity": "error",
+                "error_type": "permission_denied_command",
+                "message": f"output mentioned denied command: {command}",
+            }
+        )
+    if bool(capabilities) and not bool(capabilities.get("git_write")):
+        for command in regex_matches(GIT_WRITE_RE, text):
+            events.append(
+                {
+                    "type": "git_write_command_mentioned",
+                    "command": command,
+                    "severity": "error",
+                    "error_type": "permission_git_write_denied",
+                    "message": f"git write command is not allowed by profile: {command}",
+                }
+            )
+    if bool(capabilities) and not bool(capabilities.get("git_read")):
+        for command in regex_matches(GIT_READ_RE, text):
+            events.append(
+                {
+                    "type": "git_read_command_mentioned",
+                    "command": command,
+                    "severity": "error",
+                    "error_type": "permission_git_read_denied",
+                    "message": f"git read command is not allowed by profile: {command}",
+                }
+            )
+    if bool(capabilities) and not bool(capabilities.get("database")):
+        for command in regex_matches(DB_COMMAND_RE, text):
+            events.append(
+                {
+                    "type": "database_command_mentioned",
+                    "command": command,
+                    "severity": "error",
+                    "error_type": "permission_database_denied",
+                    "message": f"database command is not allowed by profile: {command}",
+                }
+            )
+    if bool(capabilities) and not bool(capabilities.get("network")):
+        for command in regex_matches(NETWORK_COMMAND_RE, text):
+            events.append(
+                {
+                    "type": "network_command_mentioned",
+                    "command": command,
+                    "severity": "error",
+                    "error_type": "permission_network_denied",
+                    "message": f"network command is not allowed by profile: {command}",
+                }
+            )
+    if "policy" in lower and any(word in lower for word in POLICY_FAILURE_WORDS):
+        events.append(
+            {
+                "type": "policy_denied_output",
+                "severity": "warning",
+                "error_type": "policy_denied",
+                "message": first_nonempty_line(text)[:500],
+            }
+        )
+    failure_events = [event for event in events if event.get("severity") == "error"]
+    analysis: dict[str, Any] = {
+        "failed": bool(failure_events),
+        "deny_policy": permission.get("deny_policy"),
+        "profile": permission.get("profile"),
+        "allowed_commands": list(permission.get("allowed_commands") or []),
+        "denied_commands": denied,
+        "denied_command_mentions": mentions,
+        "capabilities": dict(capabilities),
+        "events": dedupe_permission_events(events),
+    }
+    if failure_events:
+        first = failure_events[0]
+        analysis["error_type"] = first.get("error_type") or "permission_policy_failed"
+        analysis["error_summary"] = first.get("message") or "permission policy reported failure"
+    return analysis
+
+
+def command_mentioned(command: str, lower_text: str) -> bool:
+    needle = command.lower().strip()
+    if not needle:
+        return False
+    if re.fullmatch(r"[\w.-]+", needle):
+        return re.search(rf"(?<![\w.-]){re.escape(needle)}(?![\w.-])", lower_text) is not None
+    return needle in lower_text
+
+
+def regex_matches(pattern: re.Pattern[str], text: str) -> list[str]:
+    seen: set[str] = set()
+    matches: list[str] = []
+    for match in pattern.finditer(text):
+        command = " ".join(match.group(0).split())
+        key = command.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        matches.append(command)
+    return matches
+
+
+def dedupe_permission_events(events: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    seen: set[tuple[str, str]] = set()
+    result: list[dict[str, Any]] = []
+    for event in events:
+        key = (str(event.get("type") or ""), str(event.get("command") or event.get("message") or ""))
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(dict(event))
+    return result
+
+
+def first_nonempty_line(text: str) -> str:
+    for line in text.splitlines():
+        if line.strip():
+            return line.strip()
+    return ""
 
 
 def classify_failure_message(message: str, *, default: str) -> str:

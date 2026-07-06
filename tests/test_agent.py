@@ -54,6 +54,11 @@ elif "spawn_child" in task_code:
 if "SLEEP" in prompt or "timeout" in task_code:
     time.sleep(5)
 
+if "MENTION_DENIED_GIT" in prompt:
+    print("attempted command: git status", file=sys.stderr)
+if "MENTION_GIT_RESET" in prompt:
+    print("attempted command: git reset --hard", file=sys.stderr)
+
 if last_message and "LAST_MESSAGE_PATCH" in prompt:
     last_message.write_text(
         "```jsonl\n" + json.dumps({"kind": "fallback_patch"}, ensure_ascii=False) + "\n```\n",
@@ -409,9 +414,46 @@ class AgentCliTests(unittest.TestCase):
             results = read_jsonl(output_root / "results.jsonl")
             self.assertEqual("succeeded", results[0]["status"])
             self.assertTrue(results[0]["process_analysis"]["downgraded_by_deny_policy"])
+            self.assertTrue(results[0]["permission_analysis"]["downgraded_by_deny_policy"])
             self.assertIn("git", results[0]["permission_analysis"]["denied_command_mentions"])
             patch_rows = read_jsonl(root / "tmp" / "patches" / "policy_recovery_task.jsonl")
             self.assertEqual("policy_recovered_patch", patch_rows[0]["kind"])
+
+    def test_permission_denied_command_marks_task_failed_by_default(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            fake = make_fake_codex(root)
+            task = make_task(root, "denied_command_task", "MENTION_DENIED_GIT\nPATCH_PATH=tmp/patches/denied_command_task.jsonl\n")
+            task["patch_path"] = "tmp/patches/denied_command_task.jsonl"
+            tasks_jsonl = write_tasks(root, [task])
+            output_root = root / "agent_run"
+
+            rc = main(
+                [
+                    "agent",
+                    "run-plan",
+                    "--tasks-jsonl",
+                    str(tasks_jsonl),
+                    "--output-root",
+                    str(output_root),
+                    "--cwd",
+                    str(root),
+                    "--codex-bin",
+                    str(fake),
+                    "--permission-profile",
+                    "tmp-jsonl-review",
+                    "--timeout-seconds",
+                    "5",
+                ]
+            )
+
+            self.assertEqual(0, rc)
+            results = read_jsonl(output_root / "results.jsonl")
+            self.assertEqual("failed", results[0]["status"])
+            self.assertEqual("permission_denied_command", results[0]["error_type"])
+            self.assertTrue(results[0]["permission_analysis"]["failed"])
+            self.assertIn("git", results[0]["permission_analysis"]["denied_command_mentions"])
+            self.assertFalse(results[0]["output_analysis"]["failed"])
 
     def test_permission_profile_constrains_respected_bypass_argv(self) -> None:
         with tempfile.TemporaryDirectory() as td:
