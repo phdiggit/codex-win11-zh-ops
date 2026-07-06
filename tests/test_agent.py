@@ -11,7 +11,7 @@ import time
 import unittest
 from pathlib import Path
 
-from codex_win11_zh.agent import is_process_running
+from codex_win11_zh.agent import is_process_running, subprocess_startup_kwargs
 from codex_win11_zh.cli import main
 
 
@@ -86,6 +86,15 @@ if "FAIL" in prompt or "fail" in task_code:
 
 
 class AgentCliTests(unittest.TestCase):
+    def test_windows_subprocess_startup_hides_console_windows(self) -> None:
+        kwargs = subprocess_startup_kwargs(detached=False)
+        if os.name == "nt":
+            self.assertTrue(kwargs["creationflags"] & subprocess.CREATE_NO_WINDOW)
+            self.assertTrue(kwargs["creationflags"] & subprocess.CREATE_NEW_PROCESS_GROUP)
+            self.assertEqual(subprocess.SW_HIDE, kwargs["startupinfo"].wShowWindow)
+        else:
+            self.assertTrue(kwargs["start_new_session"])
+
     def test_run_plan_executes_tasks_and_collects_outputs(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)

@@ -145,24 +145,29 @@ def start_background_run(config: Mapping[str, Any]) -> dict[str, Any]:
     stderr_path = output_root / "supervisor.stderr.log"
     command = [sys.executable, "-m", "codex_win11_zh.agent_worker", "--config", str(config_path)]
     cwd = Path(str(config.get("cwd") or os.getcwd())).resolve()
-    flags: dict[str, Any] = {}
-    if os.name == "nt":
-        creationflags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) | getattr(subprocess, "DETACHED_PROCESS", 0)
-        flags["creationflags"] = creationflags
-    else:
-        flags["start_new_session"] = True
-
     env = build_runtime_env()
     src_root = str(Path(__file__).resolve().parents[1])
     env["PYTHONPATH"] = src_root + (os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else "")
     with stdout_path.open("a", encoding="utf-8", newline="\n") as stdout, stderr_path.open("a", encoding="utf-8", newline="\n") as stderr:
-        proc = subprocess.Popen(command, cwd=str(cwd), stdout=stdout, stderr=stderr, env=env, **flags)
+        proc = subprocess.Popen(command, cwd=str(cwd), stdout=stdout, stderr=stderr, env=env, **subprocess_startup_kwargs(detached=True))
     _BACKGROUND_PROCS.append(proc)
 
     append_jsonl_safe(output_root / CHILDREN_FILE, {"event": "supervisor_started", "pid": proc.pid, "at": utc_now_iso(), "command": command_to_text(command)})
     initial_status["supervisor_pid"] = proc.pid
     initial_status["command"] = command_to_text(command)
     return initial_status
+
+
+def subprocess_startup_kwargs(*, detached: bool) -> dict[str, Any]:
+    if os.name != "nt":
+        return {"start_new_session": True}
+    creationflags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) | getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    if detached:
+        creationflags |= getattr(subprocess, "DETACHED_PROCESS", 0)
+    startupinfo = subprocess.STARTUPINFO()
+    startupinfo.dwFlags |= getattr(subprocess, "STARTF_USESHOWWINDOW", 0)
+    startupinfo.wShowWindow = getattr(subprocess, "SW_HIDE", 0)
+    return {"creationflags": creationflags, "startupinfo": startupinfo}
 
 
 def run_plan_foreground(config: Mapping[str, Any], *, launched_in_background: bool) -> dict[str, Any]:
@@ -316,11 +321,6 @@ def run_one_task(
     stdin_writer: threading.Thread | None = None
     stdin_status: dict[str, Any] = {"attempted": True, "written": False, "bytes": 0}
     try:
-        flags: dict[str, Any] = {}
-        if os.name == "nt":
-            flags["creationflags"] = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
-        else:
-            flags["start_new_session"] = True
         proc = subprocess.Popen(
             command,
             cwd=str(cwd),
@@ -331,7 +331,7 @@ def run_one_task(
             encoding="utf-8",
             errors="replace",
             env=build_runtime_env(),
-            **flags,
+            **subprocess_startup_kwargs(detached=False),
         )
         state.update_task(
             task_code,
