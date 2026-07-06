@@ -29,6 +29,22 @@ CONFIG_FILE = "run_config.json"
 TERMINAL_RUN_STATUSES = {"planned", "succeeded", "failed", "killed", "stale_cleaned"}
 TERMINAL_TASK_STATUSES = {"planned", "succeeded", "failed", "timed_out", "skipped", "killed", "stale_cleaned"}
 SANDBOX_PROFILES = {"read-only", "local-write", "bypass"}
+PERMISSION_PROFILES = {"review-only", "tmp-jsonl-review", "local-write", "repo-editor", "bypass"}
+DENY_POLICIES = {"fail", "continue-with-final"}
+PROFILE_SANDBOX = {
+    "review-only": "read-only",
+    "tmp-jsonl-review": "local-write",
+    "local-write": "local-write",
+    "repo-editor": "local-write",
+    "bypass": "bypass",
+}
+PROFILE_DENIED_COMMANDS = {
+    "review-only": ["git", "pytest", "psql", "python"],
+    "tmp-jsonl-review": ["git", "pytest", "psql", "apply --execute", "--execute"],
+    "local-write": ["git reset", "git checkout", "git clean"],
+    "repo-editor": ["git reset", "git checkout", "git clean", "psql", "apply --execute"],
+    "bypass": [],
+}
 _BACKGROUND_PROCS: list[subprocess.Popen[str]] = []
 _JSONL_LOCKS: dict[str, threading.Lock] = {}
 EVENT_FAILURE_TYPES = {"error", "turn.failed"}
@@ -103,6 +119,9 @@ def run_plan(
     respect_task_argv: bool = False,
     search: bool = False,
     heartbeat_seconds: float = 1.0,
+    permission_profile: str | None = None,
+    deny_policy: str = "fail",
+    write_roots: Sequence[str | Path] = (),
 ) -> dict[str, Any]:
     config = {
         "tasks_jsonl": str(Path(tasks_jsonl)),
@@ -116,6 +135,9 @@ def run_plan(
         "respect_task_argv": bool(respect_task_argv),
         "search": bool(search),
         "heartbeat_seconds": float(heartbeat_seconds),
+        "permission_profile": permission_profile,
+        "deny_policy": deny_policy,
+        "write_roots": [str(Path(path)) for path in write_roots],
     }
     if background and not dry_run:
         return start_background_run(config)
@@ -179,13 +201,26 @@ def run_plan_foreground(config: Mapping[str, Any], *, launched_in_background: bo
     sandbox_profile = str(config.get("sandbox_profile") or "read-only")
     if sandbox_profile not in SANDBOX_PROFILES:
         raise AgentRunError(f"unsupported sandbox profile: {sandbox_profile}")
+    permission_profile = _optional_str(config.get("permission_profile"))
+    if permission_profile is not None and permission_profile not in PERMISSION_PROFILES:
+        raise AgentRunError(f"unsupported permission profile: {permission_profile}")
+    deny_policy = str(config.get("deny_policy") or "fail")
+    if deny_policy not in DENY_POLICIES:
+        raise AgentRunError(f"unsupported deny policy: {deny_policy}")
     heartbeat_seconds = max(0.2, float(config.get("heartbeat_seconds") or 1.0))
     output_root.mkdir(parents=True, exist_ok=True)
     (output_root / "logs").mkdir(parents=True, exist_ok=True)
     _reset_run_logs(output_root, keep_children=launched_in_background)
 
     raw_tasks = load_jsonl(tasks_path)
-    tasks = normalize_tasks(raw_tasks, cwd=cwd, output_root=output_root)
+    tasks = normalize_tasks(
+        raw_tasks,
+        cwd=cwd,
+        output_root=output_root,
+        permission_profile=permission_profile,
+        deny_policy=deny_policy,
+        write_roots=[str(path) for path in config.get("write_roots") or []],
+    )
     write_jsonl(output_root / TASKS_FILE, tasks)
 
     state = AgentRunState(
@@ -239,7 +274,15 @@ def run_plan_foreground(config: Mapping[str, Any], *, launched_in_background: bo
     return _finish_run(state, final_status)
 
 
-def normalize_tasks(tasks: Sequence[Mapping[str, Any]], *, cwd: Path, output_root: Path) -> list[dict[str, Any]]:
+def normalize_tasks(
+    tasks: Sequence[Mapping[str, Any]],
+    *,
+    cwd: Path,
+    output_root: Path,
+    permission_profile: str | None = None,
+    deny_policy: str = "fail",
+    write_roots: Sequence[str] = (),
+) -> list[dict[str, Any]]:
     normalized: list[dict[str, Any]] = []
     seen: set[str] = set()
     for index, task in enumerate(tasks, start=1):
@@ -259,19 +302,111 @@ def normalize_tasks(tasks: Sequence[Mapping[str, Any]], *, cwd: Path, output_roo
         event_log_path = _resolve_existing_or_declared_path(row.get("log_path"), cwd) or (output_root / "logs" / f"{task_code}.events.jsonl")
         patch_path = _resolve_existing_or_declared_path(row.get("patch_path"), cwd)
         expected_output_path = _resolve_existing_or_declared_path(row.get("expected_output_path"), cwd)
+        expected_outputs = normalize_expected_outputs(row.get("expected_outputs"), cwd=cwd)
         row["task_code"] = task_code
         row["_codex_win"] = {
             "task_index": index,
             "prompt_path": str(prompt_path),
             "patch_path": str(patch_path) if patch_path is not None else None,
             "expected_output_path": str(expected_output_path) if expected_output_path is not None else None,
+            "expected_outputs": expected_outputs,
             "last_message_path": str(last_message_path),
             "event_log_path": str(event_log_path),
             "stdout_path": str(event_log_path),
             "stderr_path": str(output_root / "logs" / f"{task_code}.stderr.log"),
         }
+        row["_codex_win"]["permission"] = build_permission_record(
+            row,
+            cwd=cwd,
+            output_root=output_root,
+            permission_profile=permission_profile,
+            deny_policy=deny_policy,
+            write_roots=write_roots,
+        )
         normalized.append(row)
     return normalized
+
+
+def normalize_expected_outputs(value: Any, *, cwd: Path) -> list[dict[str, Any]]:
+    if value is None:
+        return []
+    if not isinstance(value, Sequence) or isinstance(value, (str, bytes)):
+        raise AgentRunError("expected_outputs must be an array of objects")
+    outputs: list[dict[str, Any]] = []
+    for index, item in enumerate(value, start=1):
+        if not isinstance(item, Mapping):
+            raise AgentRunError(f"expected_outputs[{index}] must be an object")
+        row = dict(item)
+        kind = str(row.get("kind") or "").strip()
+        if kind != "jsonl_patch":
+            raise AgentRunError(f"unsupported expected output kind: {kind or '<empty>'}")
+        path = _resolve_existing_or_declared_path(row.get("path"), cwd)
+        if path is None:
+            raise AgentRunError(f"expected_outputs[{index}] is missing path")
+        row["kind"] = kind
+        row["path"] = str(path)
+        row.setdefault("fallback", "none")
+        outputs.append(row)
+    return outputs
+
+
+def build_permission_record(
+    task: Mapping[str, Any],
+    *,
+    cwd: Path,
+    output_root: Path,
+    permission_profile: str | None,
+    deny_policy: str,
+    write_roots: Sequence[str],
+) -> dict[str, Any]:
+    profile = _optional_str(task.get("permission_profile")) or permission_profile
+    if profile is not None and profile not in PERMISSION_PROFILES:
+        raise AgentRunError(f"unsupported permission profile: {profile}")
+    task_deny_policy = str(task.get("deny_policy") or deny_policy or "fail")
+    if task_deny_policy not in DENY_POLICIES:
+        raise AgentRunError(f"unsupported deny policy: {task_deny_policy}")
+    denied_commands = list(PROFILE_DENIED_COMMANDS.get(profile or "", []))
+    denied_commands.extend(_string_list(task.get("denied_commands")))
+    allowed_write_dirs = default_write_dirs_for_profile(profile, cwd=cwd, output_root=output_root)
+    allowed_write_dirs.extend(resolve_path_list(write_roots, cwd=cwd))
+    allowed_write_dirs.extend(resolve_path_list(_string_list(task.get("allowed_write_paths")), cwd=cwd))
+    deduped_write_dirs = list(dict.fromkeys(str(path) for path in allowed_write_dirs))
+    return {
+        "profile": profile,
+        "deny_policy": task_deny_policy,
+        "sandbox_profile": PROFILE_SANDBOX.get(profile or ""),
+        "allowed_write_dirs": deduped_write_dirs,
+        "denied_commands": list(dict.fromkeys(command for command in denied_commands if command)),
+    }
+
+
+def default_write_dirs_for_profile(profile: str | None, *, cwd: Path, output_root: Path) -> list[Path]:
+    if profile == "tmp-jsonl-review":
+        return [cwd / "tmp", output_root]
+    if profile in {"local-write", "repo-editor", "bypass"}:
+        return [cwd / "tmp"]
+    return [output_root] if profile == "review-only" else []
+
+
+def resolve_path_list(values: Sequence[str], *, cwd: Path) -> list[Path]:
+    resolved: list[Path] = []
+    for value in values:
+        text = str(value).strip()
+        if not text:
+            continue
+        path = Path(text)
+        resolved.append(path if path.is_absolute() else (cwd / path))
+    return resolved
+
+
+def _string_list(value: Any) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, Sequence):
+        return [str(item) for item in value]
+    return [str(value)]
 
 
 def run_one_task(
@@ -300,7 +435,9 @@ def run_one_task(
         state.append_result(result)
         state.update_task(task_code, status="failed", error=result["error"], finished_at=result["finished_at"])
         return result
-    prompt_text = prompt_path.read_text(encoding="utf-8")
+    permission = task_permission(task)
+    task_sandbox_profile = effective_task_sandbox(task, default_sandbox=sandbox_profile)
+    prompt_text = inject_permission_prelude(prompt_path.read_text(encoding="utf-8"), task=task, cwd=cwd)
     prompt_bytes = len(prompt_text.encode("utf-8"))
 
     timeout = int(task.get("timeout_seconds") or timeout_seconds)
@@ -308,11 +445,12 @@ def run_one_task(
         task,
         cwd=cwd,
         codex_bin=codex_bin,
-        sandbox_profile=sandbox_profile,
+        sandbox_profile=task_sandbox_profile,
         respect_task_argv=respect_task_argv,
         search=search,
+        allowed_write_dirs=[Path(path) for path in permission.get("allowed_write_dirs") or []],
     )
-    command_info = build_command_info(task, command=command, sandbox_profile=sandbox_profile, respect_task_argv=respect_task_argv)
+    command_info = build_command_info(task, command=command, sandbox_profile=task_sandbox_profile, respect_task_argv=respect_task_argv)
     started_at = utc_now_iso()
     started = time.perf_counter()
     stdout_file = stdout_path.open("w", encoding="utf-8", newline="\n")
@@ -344,6 +482,7 @@ def run_one_task(
             prompt_bytes=prompt_bytes,
             stdin=dict(stdin_status),
             command_info=command_info,
+            permission=permission,
         )
         append_jsonl_safe(
             output_root / CHILDREN_FILE,
@@ -392,6 +531,11 @@ def run_one_task(
     event_analysis = analyze_codex_events(stdout_path)
     output_analysis = check_task_outputs(task, paths, last_message_path=last_message_path)
     process_analysis = analyze_process_text(stderr_path, last_message_path)
+    permission_analysis = analyze_permission_output(task, stderr_path, last_message_path)
+    if process_analysis.get("failed") and process_analysis.get("error_type") == "policy_denied" and permission.get("deny_policy") == "continue-with-final":
+        process_analysis = dict(process_analysis)
+        process_analysis["failed"] = False
+        process_analysis["downgraded_by_deny_policy"] = True
     status = "timed_out" if timed_out else ("succeeded" if int(returncode) == 0 else "failed")
     failure: dict[str, Any] | None = None
     if timed_out:
@@ -421,10 +565,12 @@ def run_one_task(
         "prompt_bytes": prompt_bytes,
         "stdin": dict(stdin_status),
         "command_info": command_info,
+        "permission": permission,
         "usage": event_analysis.get("usage", {}),
         "event_analysis": event_analysis,
         "output_analysis": output_analysis,
         "process_analysis": process_analysis,
+        "permission_analysis": permission_analysis,
     }
     if failure is not None:
         result["error_type"] = failure["type"]
@@ -444,6 +590,7 @@ def run_one_task(
         prompt_bytes=prompt_bytes,
         stdin=dict(stdin_status),
         command_info=command_info,
+        permission=permission,
         output_analysis=output_analysis,
     )
     append_jsonl_safe(output_root / CHILDREN_FILE, {"event": "task_finished", "task_code": task_code, "pid": result["pid"], "at": finished_at, "status": status})
@@ -458,6 +605,7 @@ def build_task_command(
     sandbox_profile: str,
     respect_task_argv: bool,
     search: bool,
+    allowed_write_dirs: Sequence[Path] = (),
 ) -> list[str]:
     paths = task["_codex_win"] if isinstance(task.get("_codex_win"), Mapping) else {}
     last_message_path = str(paths.get("last_message_path"))
@@ -466,7 +614,7 @@ def build_task_command(
         if not argv:
             raise AgentRunError(f"task {task.get('task_code')} has no argv")
         argv[0] = resolve_executable(argv[0], cwd=cwd)
-        return normalize_respected_codex_argv(argv, cwd=cwd, last_message_path=last_message_path)
+        return normalize_respected_codex_argv(argv, cwd=cwd, last_message_path=last_message_path, allowed_write_dirs=allowed_write_dirs)
 
     codex_bin = resolve_executable(codex_bin, cwd=cwd)
     if sandbox_profile == "bypass":
@@ -480,7 +628,8 @@ def build_task_command(
         sandbox = "read-only" if sandbox_profile == "read-only" else "workspace-write"
         command.extend(["-a", "never", "-s", sandbox, "exec", "--ephemeral", "--skip-git-repo-check", "--ignore-user-config", "--ignore-rules", "-C", str(cwd)])
         if sandbox_profile == "local-write":
-            command.extend(["--add-dir", str(cwd / "tmp")])
+            for path in dedupe_paths([cwd / "tmp", *allowed_write_dirs]):
+                command.extend(["--add-dir", str(path)])
     command.extend(["--output-last-message", last_message_path, "--json", "-"])
     return command
 
@@ -489,9 +638,12 @@ def build_command_info(task: Mapping[str, Any], *, command: Sequence[str], sandb
     raw_argv = [str(part) for part in task.get("argv") or []]
     original_sandbox = infer_argv_sandbox(raw_argv)
     actual_sandbox = infer_argv_sandbox(command)
+    permission = task_permission(task)
     info = {
         "respect_task_argv": respect_task_argv,
         "sandbox_profile": sandbox_profile,
+        "permission_profile": permission.get("profile"),
+        "deny_policy": permission.get("deny_policy"),
         "original_argv_sandbox": original_sandbox,
         "actual_sandbox": actual_sandbox,
         "sandbox_overrode_task_argv": bool(raw_argv and not respect_task_argv and original_sandbox and original_sandbox != actual_sandbox),
@@ -504,7 +656,70 @@ def build_command_info(task: Mapping[str, Any], *, command: Sequence[str], sandb
     return info
 
 
-def normalize_respected_codex_argv(argv: list[str], *, cwd: Path, last_message_path: str) -> list[str]:
+def task_permission(task: Mapping[str, Any]) -> dict[str, Any]:
+    paths = task["_codex_win"] if isinstance(task.get("_codex_win"), Mapping) else {}
+    permission = paths.get("permission") if isinstance(paths, Mapping) else None
+    return dict(permission) if isinstance(permission, Mapping) else {"profile": None, "deny_policy": "fail", "allowed_write_dirs": [], "denied_commands": []}
+
+
+def effective_task_sandbox(task: Mapping[str, Any], *, default_sandbox: str) -> str:
+    permission = task_permission(task)
+    permission_sandbox = _optional_str(permission.get("sandbox_profile"))
+    if permission_sandbox:
+        return permission_sandbox
+    task_sandbox = _optional_str(task.get("sandbox_profile"))
+    return task_sandbox or default_sandbox
+
+
+def inject_permission_prelude(prompt_text: str, *, task: Mapping[str, Any], cwd: Path) -> str:
+    permission = task_permission(task)
+    profile = permission.get("profile")
+    if not profile:
+        return prompt_text
+    expected_outputs = expected_output_contracts(task)
+    lines = [
+        "Codex-win agent permission boundary:",
+        f"- cwd: {cwd}",
+        f"- permission_profile: {profile}",
+        f"- deny_policy: {permission.get('deny_policy')}",
+    ]
+    write_dirs = [str(path) for path in permission.get("allowed_write_dirs") or []]
+    if write_dirs:
+        lines.append("- allowed_write_dirs:")
+        lines.extend(f"  - {path}" for path in write_dirs)
+    denied = [str(command) for command in permission.get("denied_commands") or []]
+    if denied:
+        lines.append("- denied_commands:")
+        lines.extend(f"  - {command}" for command in denied)
+        lines.append("- If a denied command would be useful, do not run it. Continue by producing the declared output.")
+    if expected_outputs:
+        lines.append("- expected_outputs:")
+        for output in expected_outputs:
+            lines.append(f"  - kind={output.get('kind')} path={output.get('path')}")
+            if output.get("fallback") == "last_message_marked_block":
+                lines.append(f"    fallback markers: {output.get('begin')} ... {output.get('end')}")
+        lines.append("- If writing an expected output file fails, emit the exact JSONL payload between the fallback markers.")
+    return "\n".join(lines) + "\n\n--- task prompt ---\n" + prompt_text
+
+
+def expected_output_contracts(task: Mapping[str, Any]) -> list[dict[str, Any]]:
+    paths = task["_codex_win"] if isinstance(task.get("_codex_win"), Mapping) else {}
+    outputs = paths.get("expected_outputs") if isinstance(paths, Mapping) else None
+    return [dict(item) for item in outputs] if isinstance(outputs, Sequence) and not isinstance(outputs, (str, bytes)) else []
+
+
+def dedupe_paths(paths: Sequence[Path]) -> list[Path]:
+    result: list[Path] = []
+    seen: set[str] = set()
+    for path in paths:
+        key = str(path)
+        if key and key not in seen:
+            seen.add(key)
+            result.append(path)
+    return result
+
+
+def normalize_respected_codex_argv(argv: list[str], *, cwd: Path, last_message_path: str, allowed_write_dirs: Sequence[Path] = ()) -> list[str]:
     exec_index = _codex_exec_index(argv)
     if exec_index is None:
         return argv
@@ -512,8 +727,10 @@ def normalize_respected_codex_argv(argv: list[str], *, cwd: Path, last_message_p
         insert_codex_exec_options(argv, exec_index=exec_index, options=["--output-last-message", last_message_path])
     if "--json" not in argv:
         insert_codex_exec_options(argv, exec_index=exec_index, options=["--json"])
-    if infer_argv_sandbox(argv) == "workspace-write" and not argv_has_add_dir(argv, cwd / "tmp"):
-        insert_codex_exec_options(argv, exec_index=exec_index, options=["--add-dir", str(cwd / "tmp")])
+    if infer_argv_sandbox(argv) == "workspace-write":
+        for path in dedupe_paths([cwd / "tmp", *allowed_write_dirs]):
+            if not argv_has_add_dir(argv, path):
+                insert_codex_exec_options(argv, exec_index=exec_index, options=["--add-dir", str(path)])
     if not codex_exec_reads_stdin(argv, exec_index=exec_index) and not codex_exec_has_prompt_argument(argv, exec_index=exec_index):
         argv.append("-")
     return argv
@@ -1102,6 +1319,20 @@ def analyze_process_text(stderr_path: Path, last_message_path: Path) -> dict[str
     return {"failed": False}
 
 
+def analyze_permission_output(task: Mapping[str, Any], stderr_path: Path, last_message_path: Path) -> dict[str, Any]:
+    permission = task_permission(task)
+    denied = [str(command).strip() for command in permission.get("denied_commands") or [] if str(command).strip()]
+    if not denied:
+        return {"denied_command_mentions": []}
+    text_parts: list[str] = []
+    for path in (stderr_path, last_message_path):
+        if path.exists():
+            text_parts.append(path.read_text(encoding="utf-8", errors="replace")[:4000])
+    text = "\n".join(text_parts).lower()
+    mentions = [command for command in denied if command.lower() in text]
+    return {"denied_command_mentions": mentions, "deny_policy": permission.get("deny_policy")}
+
+
 def classify_failure_message(message: str, *, default: str) -> str:
     lower = message.lower()
     if "usage limit" in lower or "quota" in lower or "credit" in lower:
@@ -1135,6 +1366,20 @@ def check_task_outputs(task: Mapping[str, Any], paths: Mapping[str, Any], *, las
                 min_lines=_optional_int(task.get("expected_line_count")),
             )
         )
+    for index, output in enumerate(expected_output_contracts(task), start=1):
+        output_path = Path(str(output["path"]))
+        if not output_path.exists() and output.get("fallback") == "last_message_marked_block":
+            recoveries.append(recover_marked_jsonl_from_last_message(last_message_path, output_path, begin=str(output.get("begin") or ""), end=str(output.get("end") or "")))
+        check = check_expected_file(
+            output_path,
+            label=f"expected_output:{output.get('kind')}:{index}",
+            required=True,
+            min_bytes=_optional_int(output.get("expected_min_bytes")) or 1,
+            min_lines=_optional_int(output.get("expected_line_count")),
+        )
+        if check.get("ok") and output.get("kind") == "jsonl_patch":
+            check.update(check_jsonl_file(output_path))
+        checks.append(check)
     failed_checks = [check for check in checks if not check.get("ok")]
     if failed_checks:
         first = failed_checks[0]
@@ -1163,6 +1408,29 @@ def recover_patch_from_last_message(last_message_path: Path, patch_path: Path) -
                 handle.write(json.dumps(row, ensure_ascii=False, separators=(",", ":"), default=str) + "\n")
         return {"ok": True, "source": str(last_message_path), "path": str(patch_path), "rows": len(rows), "bytes": patch_path.stat().st_size}
     return {"ok": False, "source": str(last_message_path), "path": str(patch_path), "code": "no_structured_jsonl"}
+
+
+def recover_marked_jsonl_from_last_message(last_message_path: Path, output_path: Path, *, begin: str, end: str) -> dict[str, Any]:
+    if not begin or not end:
+        return {"ok": False, "source": str(last_message_path), "path": str(output_path), "code": "missing_markers"}
+    if not last_message_path.exists():
+        return {"ok": False, "source": str(last_message_path), "path": str(output_path), "code": "last_message_missing"}
+    text = last_message_path.read_text(encoding="utf-8", errors="replace")
+    start = text.find(begin)
+    if start < 0:
+        return {"ok": False, "source": str(last_message_path), "path": str(output_path), "code": "begin_marker_missing"}
+    start += len(begin)
+    finish = text.find(end, start)
+    if finish < 0:
+        return {"ok": False, "source": str(last_message_path), "path": str(output_path), "code": "end_marker_missing"}
+    rows = parse_jsonl_candidate(text[start:finish].strip())
+    if not rows:
+        return {"ok": False, "source": str(last_message_path), "path": str(output_path), "code": "invalid_marked_jsonl"}
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    with output_path.open("w", encoding="utf-8", newline="\n") as handle:
+        for row in rows:
+            handle.write(json.dumps(row, ensure_ascii=False, separators=(",", ":"), default=str) + "\n")
+    return {"ok": True, "source": str(last_message_path), "path": str(output_path), "rows": len(rows), "bytes": output_path.stat().st_size}
 
 
 def extract_structured_jsonl_candidates(text: str) -> list[str]:
@@ -1251,6 +1519,23 @@ def check_expected_file(path: Path, *, label: str, required: bool, min_bytes: in
     return result
 
 
+def check_jsonl_file(path: Path) -> dict[str, Any]:
+    line_count = 0
+    for line_number, line in enumerate(path.read_text(encoding="utf-8", errors="replace").splitlines(), start=1):
+        if not line.strip():
+            continue
+        line_count += 1
+        try:
+            value = json.loads(line)
+        except json.JSONDecodeError as exc:
+            return {"ok": False, "code": "invalid_jsonl", "message": f"invalid JSONL at {path}:{line_number}: {exc}"}
+        if not isinstance(value, dict):
+            return {"ok": False, "code": "invalid_jsonl", "message": f"JSONL row must be an object at {path}:{line_number}"}
+    if line_count == 0:
+        return {"ok": False, "code": "empty_jsonl", "message": f"JSONL file is empty: {path}"}
+    return {"ok": True, "line_count": line_count}
+
+
 def _optional_int(value: Any) -> int | None:
     if value is None or str(value).strip() == "":
         return None
@@ -1259,6 +1544,13 @@ def _optional_int(value: Any) -> int | None:
     except (TypeError, ValueError):
         return None
     return max(0, parsed)
+
+
+def _optional_str(value: Any) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
 
 
 def usage_from_events(path: Path) -> dict[str, Any]:

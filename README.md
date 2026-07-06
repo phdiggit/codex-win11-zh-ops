@@ -153,6 +153,39 @@ codex-win agent run-plan `
 
 需要写工作区时用 `--sandbox-profile local-write`，危险 bypass 必须显式写 `--sandbox-profile bypass`。`local-write` 会使用 Codex 的 `workspace-write`，并把 `<cwd>\tmp` 作为额外可写目录传给子 Codex，适合把 patch/result 产物落在仓库临时目录下。不使用 `--respect-task-argv` 时，`sandbox-profile` 会覆盖任务原 `argv` 中的 sandbox 选择；`results.jsonl` 的 `command_info` 会记录原 argv sandbox、实际 sandbox、是否发生覆盖，以及额外可写目录。
 
+也可以用更高层的权限画像声明子 agent 的任务边界：
+
+```powershell
+codex-win agent run-plan `
+  --tasks-jsonl tmp\profile_basis\codex_tasks.jsonl `
+  --output-root tmp\profile_basis\agent_run `
+  --permission-profile tmp-jsonl-review `
+  --deny-policy continue-with-final `
+  --write-root tmp\profile_basis
+```
+
+首版内置 `review-only`、`tmp-jsonl-review`、`local-write`、`repo-editor`、`bypass`。`permission_profile` 会写入任务快照和 `results.jsonl`，并映射到有效 sandbox、额外可写目录、禁止命令提示和 prompt 前置权限边界。任务 JSON 可以覆盖全局值：`permission_profile`、`deny_policy`、`allowed_write_paths`、`denied_commands`。这不是完整命令拦截器；首版通过 Codex sandbox、prompt 边界、产物契约和结果分析兜住长任务风险。
+
+任务可以声明通用输出契约：
+
+```json
+{
+  "task_code": "MRT-001",
+  "permission_profile": "tmp-jsonl-review",
+  "expected_outputs": [
+    {
+      "kind": "jsonl_patch",
+      "path": "tmp/retrieval_v2/patches/MRT-001.jsonl",
+      "fallback": "last_message_marked_block",
+      "begin": "PATCH_JSONL_BEGIN",
+      "end": "PATCH_JSONL_END"
+    }
+  ]
+}
+```
+
+`jsonl_patch` 会检查文件存在、非空和 JSONL object 行格式。若声明 `fallback: last_message_marked_block` 且文件未写出，run-plan 会从 last message 的 `begin/end` 标记块恢复 JSONL 文件。`deny-policy=continue-with-final` 时，策略拒绝类输出不会在契约已满足时直接判失败，而会在 `process_analysis` / `permission_analysis` 里记录降级和命令风险。
+
 每个 `output-root` 会写入这些通用文件：
 
 ```text

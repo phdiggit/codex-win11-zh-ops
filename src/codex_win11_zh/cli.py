@@ -172,6 +172,9 @@ def cmd_agent_run_plan(args: argparse.Namespace) -> int:
                 dry_run=args.dry_run,
                 respect_task_argv=args.respect_task_argv,
                 search=args.search,
+                permission_profile=args.permission_profile,
+                deny_policy=args.deny_policy,
+                write_roots=args.write_root,
             )
         )
         return 0
@@ -440,6 +443,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--max-workers", type=int, default=1)
     p.add_argument("--timeout-seconds", type=int, default=1800)
     p.add_argument("--sandbox-profile", choices=["read-only", "local-write", "bypass"], default="read-only")
+    p.add_argument("--permission-profile", choices=["review-only", "tmp-jsonl-review", "local-write", "repo-editor", "bypass"], default=None)
+    p.add_argument("--deny-policy", choices=["fail", "continue-with-final"], default="fail")
+    p.add_argument("--write-root", action="append", default=[], help="额外允许写入的目录，可重复传入")
     p.add_argument("--codex-bin", default="codex")
     p.add_argument("--respect-task-argv", action="store_true", help="按任务文件中的 argv 原样执行；默认由 codex-win 重组安全 Codex 命令")
     p.add_argument("--search", action="store_true", help="允许 Codex CLI 使用搜索相关能力；默认关闭浏览/搜索工具")

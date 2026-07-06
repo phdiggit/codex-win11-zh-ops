@@ -59,6 +59,17 @@ if last_message and "LAST_MESSAGE_PATCH" in prompt:
         "```jsonl\n" + json.dumps({"kind": "fallback_patch"}, ensure_ascii=False) + "\n```\n",
         encoding="utf-8",
     )
+elif last_message and "POLICY_DENIED_MARKED_PATCH" in prompt:
+    last_message.write_text(
+        "policy denied: git status\nPATCH_JSONL_BEGIN\n" + json.dumps({"kind": "policy_recovered_patch"}, ensure_ascii=False) + "\nPATCH_JSONL_END\n",
+        encoding="utf-8",
+    )
+    print("policy denied: git status", file=sys.stderr)
+elif last_message and "MARKED_PATCH" in prompt:
+    last_message.write_text(
+        "agent final\nPATCH_JSONL_BEGIN\n" + json.dumps({"kind": "marked_patch"}, ensure_ascii=False) + "\nPATCH_JSONL_END\n",
+        encoding="utf-8",
+    )
 elif last_message:
     last_message.write_text(json.dumps({"ok": True, "chars": len(prompt)}, ensure_ascii=False), encoding="utf-8")
 
@@ -305,6 +316,102 @@ class AgentCliTests(unittest.TestCase):
             self.assertTrue(results[0]["output_analysis"]["recoveries"][0]["ok"])
             patch_rows = read_jsonl(root / "patches" / "fallback_patch_task.jsonl")
             self.assertEqual("fallback_patch", patch_rows[0]["kind"])
+
+    def test_expected_outputs_jsonl_patch_can_use_marked_last_message_fallback(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            fake = make_fake_codex(root)
+            task = make_task(root, "marked_contract_task", "NO_PATCH\nMARKED_PATCH\n")
+            task["patch_path"] = ""
+            task["expected_outputs"] = [
+                {
+                    "kind": "jsonl_patch",
+                    "path": "tmp/patches/marked_contract_task.jsonl",
+                    "fallback": "last_message_marked_block",
+                    "begin": "PATCH_JSONL_BEGIN",
+                    "end": "PATCH_JSONL_END",
+                }
+            ]
+            tasks_jsonl = write_tasks(root, [task])
+            output_root = root / "agent_run"
+
+            rc = main(
+                [
+                    "agent",
+                    "run-plan",
+                    "--tasks-jsonl",
+                    str(tasks_jsonl),
+                    "--output-root",
+                    str(output_root),
+                    "--cwd",
+                    str(root),
+                    "--codex-bin",
+                    str(fake),
+                    "--permission-profile",
+                    "tmp-jsonl-review",
+                    "--deny-policy",
+                    "continue-with-final",
+                    "--timeout-seconds",
+                    "5",
+                ]
+            )
+
+            self.assertEqual(0, rc)
+            results = read_jsonl(output_root / "results.jsonl")
+            self.assertEqual("succeeded", results[0]["status"])
+            self.assertEqual("tmp-jsonl-review", results[0]["permission"]["profile"])
+            self.assertEqual("local-write", results[0]["command_info"]["sandbox_profile"])
+            self.assertIn(str(root / "tmp"), results[0]["command_info"]["additional_writable_dirs"])
+            self.assertTrue(results[0]["output_analysis"]["recoveries"][0]["ok"])
+            patch_rows = read_jsonl(root / "tmp" / "patches" / "marked_contract_task.jsonl")
+            self.assertEqual("marked_patch", patch_rows[0]["kind"])
+
+    def test_continue_with_final_downgrades_policy_denied_when_contract_is_recovered(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            fake = make_fake_codex(root)
+            task = make_task(root, "policy_recovery_task", "NO_PATCH\nPOLICY_DENIED_MARKED_PATCH\n")
+            task["patch_path"] = ""
+            task["expected_outputs"] = [
+                {
+                    "kind": "jsonl_patch",
+                    "path": "tmp/patches/policy_recovery_task.jsonl",
+                    "fallback": "last_message_marked_block",
+                    "begin": "PATCH_JSONL_BEGIN",
+                    "end": "PATCH_JSONL_END",
+                }
+            ]
+            tasks_jsonl = write_tasks(root, [task])
+            output_root = root / "agent_run"
+
+            rc = main(
+                [
+                    "agent",
+                    "run-plan",
+                    "--tasks-jsonl",
+                    str(tasks_jsonl),
+                    "--output-root",
+                    str(output_root),
+                    "--cwd",
+                    str(root),
+                    "--codex-bin",
+                    str(fake),
+                    "--permission-profile",
+                    "tmp-jsonl-review",
+                    "--deny-policy",
+                    "continue-with-final",
+                    "--timeout-seconds",
+                    "5",
+                ]
+            )
+
+            self.assertEqual(0, rc)
+            results = read_jsonl(output_root / "results.jsonl")
+            self.assertEqual("succeeded", results[0]["status"])
+            self.assertTrue(results[0]["process_analysis"]["downgraded_by_deny_policy"])
+            self.assertIn("git", results[0]["permission_analysis"]["denied_command_mentions"])
+            patch_rows = read_jsonl(root / "tmp" / "patches" / "policy_recovery_task.jsonl")
+            self.assertEqual("policy_recovered_patch", patch_rows[0]["kind"])
 
     def test_expected_output_path_contract_marks_task_failed(self) -> None:
         with tempfile.TemporaryDirectory() as td:
