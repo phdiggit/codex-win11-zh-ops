@@ -138,6 +138,8 @@ codex-win run --log .tmp/codex-commands.jsonl --summary "focused validation" -- 
 
 `codex-win agent run-plan` 从现有 `codex_tasks.jsonl` 读取任务，负责 Codex CLI 子进程的后台启动、并发、超时、心跳、stdout/stderr、last message、结果和 Windows 进程树清理。它只理解机械运行契约，不理解项目业务 schema；例如 retrieval_v2 的 patch 字段、人才等级、身份归属和落库 readiness 仍由业务仓库校验。
 
+面向项目接入的推荐流程见 [Agent run-plan 接入 Playbook](docs/playbooks/agent-run-plan.md)，可复制示例见 [examples/agent-run-plan](examples/agent-run-plan)。
+
 ```powershell
 codex-win agent run-plan `
   --tasks-jsonl tmp\profile_basis\codex_tasks.jsonl `

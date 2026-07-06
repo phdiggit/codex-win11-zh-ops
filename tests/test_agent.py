@@ -116,6 +116,30 @@ class AgentCliTests(unittest.TestCase):
         else:
             self.assertTrue(kwargs["start_new_session"])
 
+    def test_agent_run_plan_example_contract_is_parseable(self) -> None:
+        repo_root = Path(__file__).resolve().parents[1]
+        tasks_path = repo_root / "examples" / "agent-run-plan" / "codex_tasks.jsonl"
+        prompt_path = repo_root / "examples" / "agent-run-plan" / "prompts" / "demo_patch.md"
+        playbook_path = repo_root / "docs" / "playbooks" / "agent-run-plan.md"
+
+        rows = [json.loads(line) for line in tasks_path.read_text(encoding="utf-8").splitlines() if line.strip()]
+
+        self.assertEqual(1, len(rows))
+        task = rows[0]
+        self.assertEqual("demo_patch", task["task_code"])
+        self.assertEqual("tmp-jsonl-review", task["permission_profile"])
+        self.assertEqual("deny-rewrite", task["deny_policy"])
+        self.assertEqual("examples/agent-run-plan/prompts/demo_patch.md", task["prompt_path"])
+        self.assertTrue(prompt_path.exists())
+        self.assertIn("PATCH_JSONL_BEGIN", prompt_path.read_text(encoding="utf-8"))
+
+        outputs = task["expected_outputs"]
+        self.assertEqual(1, len(outputs))
+        self.assertEqual("jsonl_patch", outputs[0]["kind"])
+        self.assertEqual(task["patch_path"], outputs[0]["path"])
+        self.assertEqual("last_message_marked_block", outputs[0]["fallback"])
+        self.assertIn("deny-rewrite", playbook_path.read_text(encoding="utf-8"))
+
     def test_run_plan_executes_tasks_and_collects_outputs(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
