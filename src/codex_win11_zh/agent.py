@@ -31,7 +31,18 @@ TERMINAL_RUN_STATUSES = {"planned", "succeeded", "failed", "killed", "stale_clea
 TERMINAL_TASK_STATUSES = {"planned", "succeeded", "failed", "timed_out", "skipped", "killed", "stale_cleaned"}
 SANDBOX_PROFILES = {"read-only", "local-write", "bypass"}
 PERMISSION_PROFILES = {"review-only", "tmp-jsonl-review", "local-write", "repo-editor", "bypass"}
-DENY_POLICIES = {"fail", "continue-with-final"}
+DENY_POLICIES = {"fail", "continue-with-final", "deny-fail", "deny-continue", "deny-rewrite"}
+DENY_POLICY_ALIASES = {
+    "fail": "deny-fail",
+    "deny_fail": "deny-fail",
+    "deny-fail": "deny-fail",
+    "continue-with-final": "deny-rewrite",
+    "continue_with_final": "deny-rewrite",
+    "deny_continue": "deny-continue",
+    "deny-continue": "deny-continue",
+    "deny_rewrite": "deny-rewrite",
+    "deny-rewrite": "deny-rewrite",
+}
 PROFILE_SANDBOX = {
     "review-only": "read-only",
     "tmp-jsonl-review": "local-write",
@@ -223,9 +234,7 @@ def run_plan_foreground(config: Mapping[str, Any], *, launched_in_background: bo
     permission_profile = _optional_str(config.get("permission_profile"))
     if permission_profile is not None and permission_profile not in PERMISSION_PROFILES:
         raise AgentRunError(f"unsupported permission profile: {permission_profile}")
-    deny_policy = str(config.get("deny_policy") or "fail")
-    if deny_policy not in DENY_POLICIES:
-        raise AgentRunError(f"unsupported deny policy: {deny_policy}")
+    deny_policy = normalize_deny_policy(config.get("deny_policy") or "fail")
     heartbeat_seconds = max(0.2, float(config.get("heartbeat_seconds") or 1.0))
     output_root.mkdir(parents=True, exist_ok=True)
     (output_root / "logs").mkdir(parents=True, exist_ok=True)
@@ -381,9 +390,7 @@ def build_permission_record(
     profile = _optional_str(task.get("permission_profile")) or permission_profile
     if profile is not None and profile not in PERMISSION_PROFILES:
         raise AgentRunError(f"unsupported permission profile: {profile}")
-    task_deny_policy = str(task.get("deny_policy") or deny_policy or "fail")
-    if task_deny_policy not in DENY_POLICIES:
-        raise AgentRunError(f"unsupported deny policy: {task_deny_policy}")
+    task_deny_policy = normalize_deny_policy(task.get("deny_policy") or deny_policy or "fail")
     denied_commands = list(PROFILE_DENIED_COMMANDS.get(profile or "", []))
     denied_commands.extend(_string_list(task.get("denied_commands")))
     allowed_commands = list(PROFILE_ALLOWED_COMMANDS.get(profile or "", []))
@@ -421,6 +428,14 @@ def resolve_path_list(values: Sequence[str], *, cwd: Path) -> list[Path]:
         path = Path(text)
         resolved.append(path if path.is_absolute() else (cwd / path))
     return resolved
+
+
+def normalize_deny_policy(value: Any) -> str:
+    policy = str(value or "fail").strip()
+    normalized = DENY_POLICY_ALIASES.get(policy)
+    if not normalized:
+        raise AgentRunError(f"unsupported deny policy: {policy}")
+    return normalized
 
 
 def _string_list(value: Any) -> list[str]:
@@ -573,14 +588,14 @@ def run_one_task(
     output_analysis = check_task_outputs(task, paths, last_message_path=last_message_path)
     process_analysis = analyze_process_text(stderr_path, last_message_path)
     permission_analysis = analyze_permission_output(task, stdout_path, stderr_path, last_message_path)
-    if process_analysis.get("failed") and process_analysis.get("error_type") == "policy_denied" and permission.get("deny_policy") == "continue-with-final":
-        process_analysis = dict(process_analysis)
-        process_analysis["failed"] = False
-        process_analysis["downgraded_by_deny_policy"] = True
-    if permission_analysis.get("failed") and permission.get("deny_policy") == "continue-with-final" and not output_analysis.get("failed"):
-        permission_analysis = dict(permission_analysis)
-        permission_analysis["failed"] = False
-        permission_analysis["downgraded_by_deny_policy"] = True
+    deny_resolution = resolve_deny_policy(
+        permission=permission,
+        process_analysis=process_analysis,
+        permission_analysis=permission_analysis,
+        output_analysis=output_analysis,
+    )
+    process_analysis = deny_resolution["process_analysis"]
+    permission_analysis = deny_resolution["permission_analysis"]
     status = "timed_out" if timed_out else ("succeeded" if int(returncode) == 0 else "failed")
     failure: dict[str, Any] | None = None
     if timed_out:
@@ -618,6 +633,7 @@ def run_one_task(
         "output_analysis": output_analysis,
         "process_analysis": process_analysis,
         "permission_analysis": permission_analysis,
+        "deny_resolution": deny_resolution["resolution"],
     }
     if failure is not None:
         result["error_type"] = failure["type"]
@@ -782,6 +798,7 @@ def inject_permission_prelude(prompt_text: str, *, task: Mapping[str, Any], cwd:
         f"- cwd: {cwd}",
         f"- permission_profile: {profile}",
         f"- deny_policy: {permission.get('deny_policy')}",
+        f"- deny_policy_meaning: {deny_policy_prompt_hint(str(permission.get('deny_policy') or 'fail'))}",
     ]
     write_dirs = [str(path) for path in permission.get("allowed_write_dirs") or []]
     if write_dirs:
@@ -800,6 +817,17 @@ def inject_permission_prelude(prompt_text: str, *, task: Mapping[str, Any], cwd:
                 lines.append(f"    fallback markers: {output.get('begin')} ... {output.get('end')}")
         lines.append("- If writing an expected output file fails, emit the exact JSONL payload between the fallback markers.")
     return "\n".join(lines) + "\n\n--- task prompt ---\n" + prompt_text
+
+
+def deny_policy_prompt_hint(policy: str) -> str:
+    normalized = normalize_deny_policy(policy)
+    if normalized == "deny-fail":
+        return "denied or out-of-profile operations make the task fail"
+    if normalized == "deny-continue":
+        return "do not run denied operations; continue only by producing the declared output"
+    if normalized == "deny-rewrite":
+        return "if a denied operation blocks file output, emit the declared JSONL between fallback markers in the final message"
+    return normalized
 
 
 def expected_output_contracts(task: Mapping[str, Any]) -> list[dict[str, Any]]:
@@ -1460,6 +1488,52 @@ def analyze_process_text(stderr_path: Path, last_message_path: Path) -> dict[str
     if "policy" in lower and any(word in lower for word in POLICY_FAILURE_WORDS):
         return {"failed": True, "error_type": "policy_denied", "error_summary": text[:500]}
     return {"failed": False}
+
+
+def resolve_deny_policy(
+    *,
+    permission: Mapping[str, Any],
+    process_analysis: Mapping[str, Any],
+    permission_analysis: Mapping[str, Any],
+    output_analysis: Mapping[str, Any],
+) -> dict[str, Any]:
+    policy = normalize_deny_policy(permission.get("deny_policy") or "fail")
+    process = dict(process_analysis)
+    perm = dict(permission_analysis)
+    output_ok = not bool(output_analysis.get("failed"))
+    process_policy_failed = bool(process.get("failed")) and process.get("error_type") == "policy_denied"
+    permission_failed = bool(perm.get("failed"))
+    resolution: dict[str, Any] = {
+        "policy": policy,
+        "action": "none",
+        "output_contract_satisfied": output_ok,
+    }
+    if not process_policy_failed and not permission_failed:
+        return {"process_analysis": process, "permission_analysis": perm, "resolution": resolution}
+    if policy == "deny-fail":
+        resolution["action"] = "fail"
+        resolution["reason"] = "permission or process policy evidence was observed"
+        return {"process_analysis": process, "permission_analysis": perm, "resolution": resolution}
+    if policy == "deny-continue":
+        resolution["action"] = "continue" if output_ok else "fail"
+        resolution["reason"] = "continue only when output contract is satisfied"
+    elif policy == "deny-rewrite":
+        recovery_ok = output_has_recovery(output_analysis)
+        resolution["action"] = "rewrite_to_last_message" if output_ok and recovery_ok else "fail"
+        resolution["reason"] = "rewrite requires a successful last-message recovery"
+        resolution["recovered_from_last_message"] = recovery_ok
+    if resolution.get("action") in {"continue", "rewrite_to_last_message"}:
+        if process_policy_failed:
+            process["failed"] = False
+            process["downgraded_by_deny_policy"] = True
+        if permission_failed:
+            perm["failed"] = False
+            perm["downgraded_by_deny_policy"] = True
+    return {"process_analysis": process, "permission_analysis": perm, "resolution": resolution}
+
+
+def output_has_recovery(output_analysis: Mapping[str, Any]) -> bool:
+    return any(bool(recovery.get("ok")) for recovery in output_analysis.get("recoveries") or [] if isinstance(recovery, Mapping))
 
 
 def analyze_permission_output(task: Mapping[str, Any], *paths: Path) -> dict[str, Any]:

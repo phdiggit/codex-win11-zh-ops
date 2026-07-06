@@ -415,9 +415,84 @@ class AgentCliTests(unittest.TestCase):
             self.assertEqual("succeeded", results[0]["status"])
             self.assertTrue(results[0]["process_analysis"]["downgraded_by_deny_policy"])
             self.assertTrue(results[0]["permission_analysis"]["downgraded_by_deny_policy"])
+            self.assertEqual("rewrite_to_last_message", results[0]["deny_resolution"]["action"])
             self.assertIn("git", results[0]["permission_analysis"]["denied_command_mentions"])
             patch_rows = read_jsonl(root / "tmp" / "patches" / "policy_recovery_task.jsonl")
             self.assertEqual("policy_recovered_patch", patch_rows[0]["kind"])
+
+    def test_deny_continue_allows_policy_risk_when_output_contract_is_met(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            fake = make_fake_codex(root)
+            task = make_task(root, "deny_continue_task", "MENTION_DENIED_GIT\nPATCH_PATH=tmp/patches/deny_continue_task.jsonl\n")
+            task["patch_path"] = "tmp/patches/deny_continue_task.jsonl"
+            tasks_jsonl = write_tasks(root, [task])
+            output_root = root / "agent_run"
+
+            rc = main(
+                [
+                    "agent",
+                    "run-plan",
+                    "--tasks-jsonl",
+                    str(tasks_jsonl),
+                    "--output-root",
+                    str(output_root),
+                    "--cwd",
+                    str(root),
+                    "--codex-bin",
+                    str(fake),
+                    "--permission-profile",
+                    "tmp-jsonl-review",
+                    "--deny-policy",
+                    "deny-continue",
+                    "--timeout-seconds",
+                    "5",
+                ]
+            )
+
+            self.assertEqual(0, rc)
+            results = read_jsonl(output_root / "results.jsonl")
+            self.assertEqual("succeeded", results[0]["status"])
+            self.assertTrue(results[0]["permission_analysis"]["downgraded_by_deny_policy"])
+            self.assertEqual("continue", results[0]["deny_resolution"]["action"])
+            self.assertFalse(results[0]["output_analysis"]["failed"])
+
+    def test_deny_rewrite_requires_last_message_recovery(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            fake = make_fake_codex(root)
+            task = make_task(root, "deny_rewrite_without_recovery_task", "MENTION_DENIED_GIT\nPATCH_PATH=tmp/patches/deny_rewrite_without_recovery_task.jsonl\n")
+            task["patch_path"] = "tmp/patches/deny_rewrite_without_recovery_task.jsonl"
+            tasks_jsonl = write_tasks(root, [task])
+            output_root = root / "agent_run"
+
+            rc = main(
+                [
+                    "agent",
+                    "run-plan",
+                    "--tasks-jsonl",
+                    str(tasks_jsonl),
+                    "--output-root",
+                    str(output_root),
+                    "--cwd",
+                    str(root),
+                    "--codex-bin",
+                    str(fake),
+                    "--permission-profile",
+                    "tmp-jsonl-review",
+                    "--deny-policy",
+                    "deny-rewrite",
+                    "--timeout-seconds",
+                    "5",
+                ]
+            )
+
+            self.assertEqual(0, rc)
+            results = read_jsonl(output_root / "results.jsonl")
+            self.assertEqual("failed", results[0]["status"])
+            self.assertEqual("permission_denied_command", results[0]["error_type"])
+            self.assertEqual("fail", results[0]["deny_resolution"]["action"])
+            self.assertFalse(results[0]["deny_resolution"]["recovered_from_last_message"])
 
     def test_permission_denied_command_marks_task_failed_by_default(self) -> None:
         with tempfile.TemporaryDirectory() as td:

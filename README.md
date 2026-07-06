@@ -184,11 +184,15 @@ codex-win agent run-plan `
 }
 ```
 
-`jsonl_patch` 会检查文件存在、非空和 JSONL object 行格式。若声明 `fallback: last_message_marked_block` 且文件未写出，run-plan 会从 last message 的 `begin/end` 标记块恢复 JSONL 文件。`deny-policy=continue-with-final` 时，策略拒绝类输出不会在契约已满足时直接判失败，而会在 `process_analysis` / `permission_analysis` 里记录降级和命令风险。
+`jsonl_patch` 会检查文件存在、非空和 JSONL object 行格式。若声明 `fallback: last_message_marked_block` 且文件未写出，run-plan 会从 last message 的 `begin/end` 标记块恢复 JSONL 文件。`deny-policy=continue-with-final` 作为兼容别名等价于 `deny-rewrite`。
 
 声明了 profile 时，`patch_path`、`expected_output_path` 和 `expected_outputs[*].path` 必须位于允许写根内；否则任务会在启动子 Codex 前以 `permission_output_path_denied` 失败，避免长任务跑完才发现产物越界。
 
-`permission_analysis` 会把可观测的命令风险写成结构化事件：命中 `denied_commands`、git 写命令、被禁数据库命令、被禁网络命令等。默认 `deny-policy=fail` 时这些事件会让任务失败；`continue-with-final` 会在输出契约已满足时降级为风险记录，适合“拒绝越权但继续产出 JSONL”的子任务。
+`permission_analysis` 会把可观测的命令风险写成结构化事件：命中 `denied_commands`、git 写命令、被禁数据库命令、被禁网络命令等。策略处理结果写入 `deny_resolution`：
+
+- `deny-fail` / `fail`：发现策略拒绝或越权证据即失败。
+- `deny-continue`：产物契约已满足时降级为风险记录，否则失败。
+- `deny-rewrite` / `continue-with-final`：只有从 last message fallback 成功恢复产物时才降级；否则失败。
 
 每个 `output-root` 会写入这些通用文件：
 
