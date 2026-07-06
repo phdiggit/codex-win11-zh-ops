@@ -149,9 +149,9 @@ codex-win agent run-plan `
   --sandbox-profile read-only
 ```
 
-`codex_tasks.jsonl` 第一版兼容常见字段：`task_code`、`prompt_path`、`patch_path`、`last_message_path`、`log_path`、`argv`。也可以声明通用产物契约：`expected_output_path`、`expected_min_bytes`、`expected_line_count`。默认不会原样执行任务里的 `argv`，而是由 `codex-win` 重新组装 read-only Codex 命令；只有显式加 `--respect-task-argv` 时才按任务文件原样执行。两种模式都会把 `prompt_path` 的 UTF-8 内容写入 Codex stdin，并在结果里记录 prompt 字节数和 stdin 写入状态。
+`codex_tasks.jsonl` 第一版兼容常见字段：`task_code`、`prompt_path`、`patch_path`、`last_message_path`、`log_path`、`argv`。也可以声明通用产物契约：`expected_output_path`、`expected_min_bytes`、`expected_line_count`。默认不会原样执行任务里的 `argv`，而是由 `codex-win` 重新组装 read-only Codex 命令；显式加 `--respect-task-argv` 时会保留任务 argv，但若识别到 `codex exec` 且缺少 stdin/JSON/last-message 参数，会补上 `-`、`--json`、`--output-last-message`，避免 prompt 文件没有进入子 Codex。两种模式都会把 `prompt_path` 的 UTF-8 内容写入 Codex stdin，并在结果里记录 prompt 字节数和 stdin 写入状态。
 
-需要写工作区时用 `--sandbox-profile local-write`，危险 bypass 必须显式写 `--sandbox-profile bypass`。不使用 `--respect-task-argv` 时，`sandbox-profile` 会覆盖任务原 `argv` 中的 sandbox 选择；`results.jsonl` 的 `command_info` 会记录原 argv sandbox、实际 sandbox、是否发生覆盖。
+需要写工作区时用 `--sandbox-profile local-write`，危险 bypass 必须显式写 `--sandbox-profile bypass`。`local-write` 会使用 Codex 的 `workspace-write`，并把 `<cwd>\tmp` 作为额外可写目录传给子 Codex，适合把 patch/result 产物落在仓库临时目录下。不使用 `--respect-task-argv` 时，`sandbox-profile` 会覆盖任务原 `argv` 中的 sandbox 选择；`results.jsonl` 的 `command_info` 会记录原 argv sandbox、实际 sandbox、是否发生覆盖，以及额外可写目录。
 
 每个 `output-root` 会写入这些通用文件：
 
@@ -174,7 +174,7 @@ codex-win agent kill --output-root tmp\profile_basis\agent_run
 codex-win agent cleanup-stale --output-root tmp\profile_basis\agent_run
 ```
 
-任务成功不只看进程退出码。若 Codex JSON event log 出现 `type=error`、`turn.failed`、usage limit、rate limit、auth error，或 stderr/last message 暗示策略拒绝，任务会标为 `failed`，并在 `results.jsonl` 写入 `error_type`、`error`、`event_analysis`。如果任务声明了 `patch_path`、`expected_output_path` 或最小大小/行数要求，run-plan 会做通用文件存在性检查；不满足时不会标 `succeeded`。
+任务成功不只看进程退出码。若 Codex JSON event log 出现 `type=error`、`turn.failed`、usage limit、rate limit、auth error，或 stderr/last message 暗示策略拒绝，任务会标为 `failed`，并在 `results.jsonl` 写入 `error_type`、`error`、`event_analysis`。如果任务声明了 `patch_path`、`expected_output_path` 或最小大小/行数要求，run-plan 会做通用文件存在性检查；不满足时不会标 `succeeded`。任务可显式声明 `patch_fallback_from_last_message: true`，允许在 `patch_path` 缺失时从 last message 中的 fenced `jsonl`/`json` 块或 JSON 数组恢复为 JSONL patch。
 
 `collect` 会检查重复 `task_code`、重复结果、last message 是否存在/为空，以及 patch/event JSONL 是否可解析；它不判断 JSONL payload 的业务含义，也不 apply patch、不写数据库。
 

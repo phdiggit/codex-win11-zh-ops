@@ -34,7 +34,7 @@ def arg_value(name: str) -> str:
     return sys.argv[index + 1]
 
 
-prompt = sys.stdin.read()
+prompt = sys.stdin.read() if "-" in sys.argv else ""
 last_message = pathlib.Path(arg_value("--output-last-message"))
 if last_message:
     last_message.parent.mkdir(parents=True, exist_ok=True)
@@ -54,7 +54,12 @@ elif "spawn_child" in task_code:
 if "SLEEP" in prompt or "timeout" in task_code:
     time.sleep(5)
 
-if last_message:
+if last_message and "LAST_MESSAGE_PATCH" in prompt:
+    last_message.write_text(
+        "```jsonl\n" + json.dumps({"kind": "fallback_patch"}, ensure_ascii=False) + "\n```\n",
+        encoding="utf-8",
+    )
+elif last_message:
     last_message.write_text(json.dumps({"ok": True, "chars": len(prompt)}, ensure_ascii=False), encoding="utf-8")
 
 if "NO_PATCH" not in prompt and "PATCH_PATH=" in prompt:
@@ -258,6 +263,39 @@ class AgentCliTests(unittest.TestCase):
             self.assertEqual("failed", results[0]["status"])
             self.assertEqual("missing_expected_output", results[0]["error_type"])
             self.assertFalse((root / "patches" / "missing_patch_task.jsonl").exists())
+
+    def test_patch_can_be_recovered_from_last_message_when_enabled(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            fake = make_fake_codex(root)
+            task = make_task(root, "fallback_patch_task", "NO_PATCH\nLAST_MESSAGE_PATCH\n")
+            task["patch_fallback_from_last_message"] = True
+            tasks_jsonl = write_tasks(root, [task])
+            output_root = root / "agent_run"
+
+            rc = main(
+                [
+                    "agent",
+                    "run-plan",
+                    "--tasks-jsonl",
+                    str(tasks_jsonl),
+                    "--output-root",
+                    str(output_root),
+                    "--cwd",
+                    str(root),
+                    "--codex-bin",
+                    str(fake),
+                    "--timeout-seconds",
+                    "5",
+                ]
+            )
+
+            self.assertEqual(0, rc)
+            results = read_jsonl(output_root / "results.jsonl")
+            self.assertEqual("succeeded", results[0]["status"])
+            self.assertTrue(results[0]["output_analysis"]["recoveries"][0]["ok"])
+            patch_rows = read_jsonl(root / "patches" / "fallback_patch_task.jsonl")
+            self.assertEqual("fallback_patch", patch_rows[0]["kind"])
 
     def test_expected_output_path_contract_marks_task_failed(self) -> None:
         with tempfile.TemporaryDirectory() as td:
@@ -569,6 +607,73 @@ class AgentCliTests(unittest.TestCase):
             self.assertTrue(results[0]["command_info"]["respect_task_argv"])
             last_message = json.loads((root / "logs" / "respect_relative_task.last.md").read_text(encoding="utf-8"))
             self.assertGreater(last_message["chars"], 0)
+
+    def test_respect_task_argv_adds_stdin_marker_for_codex_exec(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            fake = make_fake_codex(root)
+            task = make_task(root, "respect_needs_stdin_task", "hello implicit stdin\n")
+            task["argv"] = [fake.name, "exec", "-s", "workspace-write", "--output-last-message", task["last_message_path"], "--json"]
+            tasks_jsonl = write_tasks(root, [task])
+            output_root = root / "agent_run"
+
+            rc = main(
+                [
+                    "agent",
+                    "run-plan",
+                    "--tasks-jsonl",
+                    str(tasks_jsonl),
+                    "--output-root",
+                    str(output_root),
+                    "--cwd",
+                    str(root),
+                    "--respect-task-argv",
+                    "--timeout-seconds",
+                    "5",
+                ]
+            )
+
+            self.assertEqual(0, rc)
+            results = read_jsonl(output_root / "results.jsonl")
+            self.assertEqual("succeeded", results[0]["status"])
+            self.assertTrue(results[0]["command_info"]["respect_task_argv_adjusted"])
+            self.assertEqual("workspace-write", results[0]["command_info"]["actual_sandbox"])
+            self.assertIn(str(root / "tmp"), results[0]["command_info"]["additional_writable_dirs"])
+            last_message = json.loads((root / "logs" / "respect_needs_stdin_task.last.md").read_text(encoding="utf-8"))
+            self.assertGreater(last_message["chars"], 0)
+
+    def test_local_write_adds_tmp_as_writable_dir(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            fake = make_fake_codex(root)
+            task = make_task(root, "local_write_task", "PATCH_PATH=tmp/patches/local_write_task.jsonl\n")
+            task["patch_path"] = "tmp/patches/local_write_task.jsonl"
+            tasks_jsonl = write_tasks(root, [task])
+            output_root = root / "agent_run"
+
+            rc = main(
+                [
+                    "agent",
+                    "run-plan",
+                    "--tasks-jsonl",
+                    str(tasks_jsonl),
+                    "--output-root",
+                    str(output_root),
+                    "--cwd",
+                    str(root),
+                    "--codex-bin",
+                    str(fake),
+                    "--sandbox-profile",
+                    "local-write",
+                    "--timeout-seconds",
+                    "5",
+                ]
+            )
+
+            self.assertEqual(0, rc)
+            results = read_jsonl(output_root / "results.jsonl")
+            self.assertEqual("workspace-write", results[0]["command_info"]["actual_sandbox"])
+            self.assertIn(str(root / "tmp"), results[0]["command_info"]["additional_writable_dirs"])
 
     def test_timeout_kills_spawned_child_process(self) -> None:
         with tempfile.TemporaryDirectory() as td:

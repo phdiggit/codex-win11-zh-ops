@@ -390,7 +390,7 @@ def run_one_task(
     finished_at = utc_now_iso()
     elapsed = duration_sec(started, time.perf_counter())
     event_analysis = analyze_codex_events(stdout_path)
-    output_analysis = check_task_outputs(task, paths)
+    output_analysis = check_task_outputs(task, paths, last_message_path=last_message_path)
     process_analysis = analyze_process_text(stderr_path, last_message_path)
     status = "timed_out" if timed_out else ("succeeded" if int(returncode) == 0 else "failed")
     failure: dict[str, Any] | None = None
@@ -459,15 +459,15 @@ def build_task_command(
     respect_task_argv: bool,
     search: bool,
 ) -> list[str]:
+    paths = task["_codex_win"] if isinstance(task.get("_codex_win"), Mapping) else {}
+    last_message_path = str(paths.get("last_message_path"))
     if respect_task_argv:
         argv = [str(part) for part in task.get("argv") or []]
         if not argv:
             raise AgentRunError(f"task {task.get('task_code')} has no argv")
         argv[0] = resolve_executable(argv[0], cwd=cwd)
-        return argv
+        return normalize_respected_codex_argv(argv, cwd=cwd, last_message_path=last_message_path)
 
-    paths = task["_codex_win"] if isinstance(task.get("_codex_win"), Mapping) else {}
-    last_message_path = str(paths.get("last_message_path"))
     codex_bin = resolve_executable(codex_bin, cwd=cwd)
     if sandbox_profile == "bypass":
         command = [codex_bin, "exec", "-C", str(cwd), "--dangerously-bypass-approvals-and-sandbox"]
@@ -479,6 +479,8 @@ def build_task_command(
             command.extend(["--disable", "standalone_web_search", "--disable", "browser_use", "--disable", "browser_use_external"])
         sandbox = "read-only" if sandbox_profile == "read-only" else "workspace-write"
         command.extend(["-a", "never", "-s", sandbox, "exec", "--ephemeral", "--skip-git-repo-check", "--ignore-user-config", "--ignore-rules", "-C", str(cwd)])
+        if sandbox_profile == "local-write":
+            command.extend(["--add-dir", str(cwd / "tmp")])
     command.extend(["--output-last-message", last_message_path, "--json", "-"])
     return command
 
@@ -496,7 +498,104 @@ def build_command_info(task: Mapping[str, Any], *, command: Sequence[str], sandb
     }
     if raw_argv:
         info["original_argv"] = command_to_text(raw_argv)
+        info["respect_task_argv_adjusted"] = bool(respect_task_argv and command_to_text(raw_argv) != command_to_text(command))
+    if any(str(part) == "--add-dir" for part in command):
+        info["additional_writable_dirs"] = [str(command[index + 1]) for index, part in enumerate(command[:-1]) if str(part) == "--add-dir"]
     return info
+
+
+def normalize_respected_codex_argv(argv: list[str], *, cwd: Path, last_message_path: str) -> list[str]:
+    exec_index = _codex_exec_index(argv)
+    if exec_index is None:
+        return argv
+    if "--output-last-message" not in argv and last_message_path:
+        insert_codex_exec_options(argv, exec_index=exec_index, options=["--output-last-message", last_message_path])
+    if "--json" not in argv:
+        insert_codex_exec_options(argv, exec_index=exec_index, options=["--json"])
+    if infer_argv_sandbox(argv) == "workspace-write" and not argv_has_add_dir(argv, cwd / "tmp"):
+        insert_codex_exec_options(argv, exec_index=exec_index, options=["--add-dir", str(cwd / "tmp")])
+    if not codex_exec_reads_stdin(argv, exec_index=exec_index) and not codex_exec_has_prompt_argument(argv, exec_index=exec_index):
+        argv.append("-")
+    return argv
+
+
+def _codex_exec_index(argv: Sequence[str]) -> int | None:
+    for index, part in enumerate(argv):
+        if str(part) == "exec":
+            return index
+    return None
+
+
+def codex_exec_reads_stdin(argv: Sequence[str], *, exec_index: int | None = None) -> bool:
+    if exec_index is None:
+        exec_index = _codex_exec_index(argv)
+    if exec_index is None:
+        return True
+    return "-" in [str(part) for part in argv[exec_index + 1 :]]
+
+
+_CODEX_EXEC_OPTIONS_WITH_VALUE = {
+    "-a",
+    "--ask-for-approval",
+    "-c",
+    "--config",
+    "--enable",
+    "--disable",
+    "-i",
+    "--image",
+    "-m",
+    "--model",
+    "--local-provider",
+    "-p",
+    "--profile",
+    "-s",
+    "--sandbox",
+    "-C",
+    "--cd",
+    "--add-dir",
+    "--output-schema",
+    "--color",
+    "-o",
+    "--output-last-message",
+}
+
+
+def codex_exec_has_prompt_argument(argv: Sequence[str], *, exec_index: int) -> bool:
+    prompt_index = codex_exec_prompt_index(argv, exec_index=exec_index)
+    return prompt_index is not None and str(argv[prompt_index]) != "-"
+
+
+def codex_exec_prompt_index(argv: Sequence[str], *, exec_index: int) -> int | None:
+    skip_next = False
+    for index, part in enumerate([str(item) for item in argv[exec_index + 1 :]], start=exec_index + 1):
+        if skip_next:
+            skip_next = False
+            continue
+        if part == "-":
+            return index
+        if part in _CODEX_EXEC_OPTIONS_WITH_VALUE:
+            skip_next = True
+            continue
+        if part.startswith("--") and "=" in part:
+            continue
+        if part.startswith("-"):
+            continue
+        return index
+    return None
+
+
+def insert_codex_exec_options(argv: list[str], *, exec_index: int, options: Sequence[str]) -> None:
+    prompt_index = codex_exec_prompt_index(argv, exec_index=exec_index)
+    insert_at = prompt_index if prompt_index is not None else len(argv)
+    argv[insert_at:insert_at] = [str(option) for option in options]
+
+
+def argv_has_add_dir(argv: Sequence[str], path: Path) -> bool:
+    expected = str(path)
+    for index, part in enumerate(argv[:-1]):
+        if str(part) == "--add-dir" and str(argv[index + 1]) == expected:
+            return True
+    return False
 
 
 def infer_argv_sandbox(argv: Sequence[str]) -> str | None:
@@ -1016,11 +1115,15 @@ def classify_failure_message(message: str, *, default: str) -> str:
     return default
 
 
-def check_task_outputs(task: Mapping[str, Any], paths: Mapping[str, Any]) -> dict[str, Any]:
+def check_task_outputs(task: Mapping[str, Any], paths: Mapping[str, Any], *, last_message_path: Path) -> dict[str, Any]:
     checks: list[dict[str, Any]] = []
+    recoveries: list[dict[str, Any]] = []
     patch_path = paths.get("patch_path")
     if patch_path:
-        checks.append(check_expected_file(Path(str(patch_path)), label="patch", required=True, min_bytes=1, min_lines=None))
+        patch_file = Path(str(patch_path))
+        if not patch_file.exists() and bool(task.get("patch_fallback_from_last_message")):
+            recoveries.append(recover_patch_from_last_message(last_message_path, patch_file))
+        checks.append(check_expected_file(patch_file, label="patch", required=True, min_bytes=1, min_lines=None))
     expected_path = paths.get("expected_output_path")
     if expected_path:
         checks.append(
@@ -1040,8 +1143,79 @@ def check_task_outputs(task: Mapping[str, Any], paths: Mapping[str, Any]) -> dic
             "error_type": str(first.get("code") or "missing_expected_output"),
             "error_summary": str(first.get("message") or "expected output contract was not satisfied"),
             "checks": checks,
+            "recoveries": recoveries,
         }
-    return {"failed": False, "checks": checks}
+    return {"failed": False, "checks": checks, "recoveries": recoveries}
+
+
+def recover_patch_from_last_message(last_message_path: Path, patch_path: Path) -> dict[str, Any]:
+    if not last_message_path.exists():
+        return {"ok": False, "source": str(last_message_path), "path": str(patch_path), "code": "last_message_missing"}
+    text = last_message_path.read_text(encoding="utf-8", errors="replace")
+    candidates = extract_structured_jsonl_candidates(text)
+    for candidate in candidates:
+        rows = parse_jsonl_candidate(candidate)
+        if not rows:
+            continue
+        patch_path.parent.mkdir(parents=True, exist_ok=True)
+        with patch_path.open("w", encoding="utf-8", newline="\n") as handle:
+            for row in rows:
+                handle.write(json.dumps(row, ensure_ascii=False, separators=(",", ":"), default=str) + "\n")
+        return {"ok": True, "source": str(last_message_path), "path": str(patch_path), "rows": len(rows), "bytes": patch_path.stat().st_size}
+    return {"ok": False, "source": str(last_message_path), "path": str(patch_path), "code": "no_structured_jsonl"}
+
+
+def extract_structured_jsonl_candidates(text: str) -> list[str]:
+    candidates: list[str] = []
+    marker = "```"
+    position = 0
+    while True:
+        start = text.find(marker, position)
+        if start < 0:
+            break
+        line_end = text.find("\n", start + len(marker))
+        if line_end < 0:
+            break
+        info = text[start + len(marker) : line_end].strip().lower()
+        end = text.find(marker, line_end + 1)
+        if end < 0:
+            break
+        body = text[line_end + 1 : end].strip()
+        if info in {"json", "jsonl", "ndjson"} and body:
+            candidates.append(body)
+        position = end + len(marker)
+    stripped = text.strip()
+    if stripped.startswith("["):
+        candidates.append(stripped)
+    elif "\n" in stripped and all(line.lstrip().startswith("{") for line in stripped.splitlines() if line.strip()):
+        candidates.append(stripped)
+    return candidates
+
+
+def parse_jsonl_candidate(text: str) -> list[dict[str, Any]]:
+    stripped = text.strip()
+    if not stripped:
+        return []
+    try:
+        value = json.loads(stripped)
+    except json.JSONDecodeError:
+        rows: list[dict[str, Any]] = []
+        for line in stripped.splitlines():
+            if not line.strip():
+                continue
+            try:
+                row = json.loads(line)
+            except json.JSONDecodeError:
+                return []
+            if not isinstance(row, dict):
+                return []
+            rows.append(row)
+        return rows
+    if isinstance(value, list) and all(isinstance(row, dict) for row in value):
+        return [dict(row) for row in value]
+    if isinstance(value, dict):
+        return [dict(value)]
+    return []
 
 
 def check_expected_file(path: Path, *, label: str, required: bool, min_bytes: int | None, min_lines: int | None) -> dict[str, Any]:
