@@ -265,6 +265,7 @@ def run_plan_foreground(config: Mapping[str, Any], *, launched_in_background: bo
         raw_tasks,
         cwd=cwd,
         output_root=output_root,
+        search=bool(config.get("search")),
         permission_profile=permission_profile,
         deny_policy=deny_policy,
         write_roots=[str(path) for path in config.get("write_roots") or []],
@@ -328,6 +329,7 @@ def normalize_tasks(
     *,
     cwd: Path,
     output_root: Path,
+    search: bool = False,
     permission_profile: str | None = None,
     deny_policy: str = "fail",
     write_roots: Sequence[str] = (),
@@ -379,6 +381,7 @@ def normalize_tasks(
             row,
             cwd=cwd,
             output_root=output_root,
+            search=search,
             permission_profile=permission_profile,
             deny_policy=deny_policy,
             write_roots=write_roots,
@@ -417,6 +420,7 @@ def build_permission_record(
     *,
     cwd: Path,
     output_root: Path,
+    search: bool,
     permission_profile: str | None,
     deny_policy: str,
     write_roots: Sequence[str],
@@ -432,6 +436,8 @@ def build_permission_record(
     allowed_commands = list(PROFILE_ALLOWED_COMMANDS.get(profile or "", []))
     allowed_commands.extend(_string_list(task.get("allowed_commands")))
     capabilities = dict(PROFILE_CAPABILITIES.get(profile or "", {}))
+    if capabilities and search:
+        capabilities["network"] = True
     allowed_write_dirs = default_write_dirs_for_profile(profile, cwd=cwd, output_root=output_root)
     allowed_write_dirs.extend(resolve_path_list(write_roots, cwd=cwd))
     allowed_write_dirs.extend(resolve_path_list(_string_list(task.get("allowed_write_paths")), cwd=cwd))
@@ -842,6 +848,7 @@ def build_task_command(
         return normalize_respected_codex_argv(
             argv,
             cwd=cwd,
+            search=search,
             sandbox_profile=sandbox_profile,
             last_message_path=last_message_path,
             allowed_write_dirs=allowed_write_dirs,
@@ -970,6 +977,10 @@ def inject_permission_prelude(prompt_text: str, *, task: Mapping[str, Any], cwd:
         lines.append("- denied_commands:")
         lines.extend(f"  - {command}" for command in denied)
         lines.append("- If a denied command would be useful, do not run it. Continue by producing the declared output.")
+    capabilities = permission.get("capabilities") if isinstance(permission.get("capabilities"), Mapping) else {}
+    if capabilities:
+        lines.append("- capabilities:")
+        lines.extend(f"  - {name}: {'allowed' if bool(value) else 'denied'}" for name, value in capabilities.items())
     readonly_equivalents = [item for item in permission.get("readonly_equivalents") or [] if isinstance(item, Mapping)]
     if readonly_equivalents:
         lines.append("- readonly_equivalents:")
@@ -1060,6 +1071,7 @@ def normalize_respected_codex_argv(
     argv: list[str],
     *,
     cwd: Path,
+    search: bool = False,
     sandbox_profile: str | None = None,
     last_message_path: str,
     allowed_write_dirs: Sequence[Path] = (),
@@ -1068,6 +1080,9 @@ def normalize_respected_codex_argv(
     exec_index = _codex_exec_index(argv)
     if exec_index is None:
         return argv
+    if search and "--search" not in argv[:exec_index]:
+        argv.insert(exec_index, "--search")
+        exec_index += 1
     if enforce_permission_sandbox and sandbox_profile:
         enforce_codex_exec_sandbox(argv, exec_index=exec_index, sandbox_profile=sandbox_profile)
     if "--output-last-message" not in argv and last_message_path:

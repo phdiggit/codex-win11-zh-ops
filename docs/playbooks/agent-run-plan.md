@@ -54,6 +54,7 @@ codex-win agent cleanup-stale --output-root tmp\agent_run
 常用 profile：
 
 - `review-only`：只读任务上下文，只能写 last message，不写 repo。
+- `--search`：在保持当前 permission profile 文件/命令边界不变的前提下，将有效 `network` capability 设为允许，并在子任务权限前置说明中明确声明；普通命令重组和 `--respect-task-argv` 两种模式都会启用搜索，未指定时继续禁用浏览/搜索工具。
 - `tmp-jsonl-review`：可写 `tmp/**` 下的 patch/log/report，禁止源码修改、DB、网络和 git 写命令。
 - `local-write`：允许工作区白名单写入，适合受控生成物。
 - `repo-editor`：允许编辑源码，但仍禁止危险 git destructive 命令。

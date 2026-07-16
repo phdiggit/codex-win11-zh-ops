@@ -702,6 +702,118 @@ class AgentCliTests(unittest.TestCase):
             self.assertIn("changed_files:", dump)
             self.assertIn("Use readonly_equivalents instead of running denied commands.", dump)
 
+    def test_review_only_search_enables_network_capability_and_prompt_boundary(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            fake = make_fake_codex(root)
+            task = make_task(root, "review_search_task", "NO_PATCH\nDUMP_PROMPT_PATH=prompt_dump.md\n")
+            task["patch_path"] = ""
+            tasks_jsonl = write_tasks(root, [task])
+            output_root = root / "agent_run"
+
+            rc = main(
+                [
+                    "agent",
+                    "run-plan",
+                    "--tasks-jsonl",
+                    str(tasks_jsonl),
+                    "--output-root",
+                    str(output_root),
+                    "--cwd",
+                    str(root),
+                    "--codex-bin",
+                    str(fake),
+                    "--permission-profile",
+                    "review-only",
+                    "--search",
+                    "--timeout-seconds",
+                    "5",
+                ]
+            )
+
+            self.assertEqual(0, rc)
+            results = read_jsonl(output_root / "results.jsonl")
+            self.assertEqual("succeeded", results[0]["status"])
+            self.assertTrue(results[0]["permission"]["capabilities"]["network"])
+            prompt_dump = (root / "prompt_dump.md").read_text(encoding="utf-8")
+            self.assertIn("- network: allowed", prompt_dump)
+            command = json.loads((output_root / "status.json").read_text(encoding="utf-8"))["tasks"][0]["command"]
+            self.assertIn("--search", command)
+            self.assertNotIn("standalone_web_search", command)
+
+    def test_review_only_without_search_keeps_network_denied(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            fake = make_fake_codex(root)
+            task = make_task(root, "review_no_search_task", "NO_PATCH\nDUMP_PROMPT_PATH=prompt_dump.md\n")
+            task["patch_path"] = ""
+            tasks_jsonl = write_tasks(root, [task])
+            output_root = root / "agent_run"
+
+            rc = main(
+                [
+                    "agent",
+                    "run-plan",
+                    "--tasks-jsonl",
+                    str(tasks_jsonl),
+                    "--output-root",
+                    str(output_root),
+                    "--cwd",
+                    str(root),
+                    "--codex-bin",
+                    str(fake),
+                    "--permission-profile",
+                    "review-only",
+                    "--timeout-seconds",
+                    "5",
+                ]
+            )
+
+            self.assertEqual(0, rc)
+            results = read_jsonl(output_root / "results.jsonl")
+            self.assertFalse(results[0]["permission"]["capabilities"]["network"])
+            prompt_dump = (root / "prompt_dump.md").read_text(encoding="utf-8")
+            self.assertIn("- network: denied", prompt_dump)
+            command = json.loads((output_root / "status.json").read_text(encoding="utf-8"))["tasks"][0]["command"]
+            self.assertNotIn("--search", command)
+            self.assertIn("standalone_web_search", command)
+
+    def test_review_only_search_is_preserved_with_respected_task_argv(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            fake = make_fake_codex(root)
+            task = make_task(root, "review_respected_search_task", "NO_PATCH\nDUMP_PROMPT_PATH=prompt_dump.md\n")
+            task["patch_path"] = ""
+            task["argv"] = [str(fake), "exec", "-"]
+            tasks_jsonl = write_tasks(root, [task])
+            output_root = root / "agent_run"
+
+            rc = main(
+                [
+                    "agent",
+                    "run-plan",
+                    "--tasks-jsonl",
+                    str(tasks_jsonl),
+                    "--output-root",
+                    str(output_root),
+                    "--cwd",
+                    str(root),
+                    "--permission-profile",
+                    "review-only",
+                    "--respect-task-argv",
+                    "--search",
+                    "--timeout-seconds",
+                    "5",
+                ]
+            )
+
+            self.assertEqual(0, rc)
+            results = read_jsonl(output_root / "results.jsonl")
+            self.assertTrue(results[0]["permission"]["capabilities"]["network"])
+            command = json.loads((output_root / "status.json").read_text(encoding="utf-8"))["tasks"][0]["command"]
+            self.assertIn("--search", command)
+            self.assertLess(command.index("--search"), command.index("exec"))
+
     def test_permission_profile_uses_minimal_git_snapshot_by_default(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
